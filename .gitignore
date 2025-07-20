@@ -1,0 +1,19 @@
+# Ignore everything
+*
+
+# Allow directories leading to the files you want to keep
+!clang/
+!clang/lib/
+!clang/lib/CodeGen/
+!clang/lib/CodeGen/*
+
+!llvm/
+!llvm/projects/
+!llvm/projects/llvm-cbe/
+!llvm/projects/llvm-cbe/lib/
+!llvm/projects/llvm-cbe/lib/Target/
+!llvm/projects/llvm-cbe/lib/Target/CBackend/
+!llvm/projects/llvm-cbe/lib/Target/CBackend/CBackend.cpp
+!llvm/projects/llvm-cbe/lib/Target/CBackend/CBackend.h
+
+!/.gitignore
