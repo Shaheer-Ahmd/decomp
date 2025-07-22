@@ -1810,6 +1810,7 @@ std::string CWriter::GetValueName(const Value *Operand) {
 /// writeInstComputationInline - Emit the computation for the specified
 /// instruction inline, with no destination provided.
 void CWriter::writeInstComputationInline(Instruction &I) {
+
   // C can't handle non-power-of-two integer types
   unsigned mask = 0;
   Type *Ty = I.getType();
@@ -1825,15 +1826,18 @@ void CWriter::writeInstComputationInline(Instruction &I) {
   // Also truncate odd bit sizes
   if (mask)
     Out << "((";
-
   visit(&I);
-
   if (mask)
     Out << ")&" << mask << ")";
 }
 
 void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
                                    bool wrapInParens) {
+  // Load Inst: source
+  if (LoadInst *LI = dyn_cast<LoadInst>(Operand)) {
+    Out << GetValueName(LI->getPointerOperand());
+    return;
+  }
   if (Instruction *I = dyn_cast<Instruction>(Operand))
     // Should we inline this instruction to build a tree?
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
@@ -4030,8 +4034,6 @@ void CWriter::printFunction(Function &F) {
 
       if (!canDeclareLocalLate(*I)) {
         Out << "  ";
-        // // std::cout << "Calling printTypeName in printFunction in condition
-        // that checks if the local variable can be declared late\n";
         printTypeName(Out, I->getType(), false) << ' ' << GetValueName(&*I);
         // std::cout << "printFunction : <some_datatype> " << GetValueName(&*I)
         // << ";\n";
@@ -4437,6 +4439,13 @@ void CWriter::visitReturnInst(ReturnInst &I) {
   Out << "  return";
   if (I.getNumOperands()) {
     Out << ' ';
+    // check I.getOperand(0) can be casted to a Load inst
+    if (LoadInst *LI = dyn_cast<LoadInst>(I.getOperand(0))) {
+      // If the operand is a load, we need to write the value of the load
+      // instead of the pointer.
+      Out << GetValueName(LI->getPointerOperand()) << ";\n";
+      return;
+    }
     writeOperand(I.getOperand(0), ContextCasted);
   }
   Out << ";\n";
@@ -4456,8 +4465,9 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
     Out << "  switch (";
     writeOperand(Cond);
     Out << ") {\n  default:\n";
-    printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
-    printBranchToBlock(SI.getParent(), SI.getDefaultDest(), 2);
+    printBasicBlockNoLabel(SI.getDefaultDest());
+    // printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
+    // printBranchToBlock(SI.getParent(), SI.getDefaultDest(), 2);
 
     // Skip the first item since that's the default case.
     for (SwitchInst::CaseIt i = SI.case_begin(), e = SI.case_end(); i != e;
@@ -4467,13 +4477,29 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
       Out << "  case ";
       writeOperand(CaseVal);
       Out << ":\n";
-      printPHICopiesForSuccessor(SI.getParent(), Succ, 2);
-      if (isGotoCodeNecessary(SI.getParent(), Succ))
-        printBranchToBlock(SI.getParent(), Succ, 2);
-      else
-        Out << "    break;\n";
+      printBasicBlockNoLabel(Succ);
+      // printPHICopiesForSuccessor(SI.getParent(), Succ, 2);
+      // if (isGotoCodeNecessary(SI.getParent(), Succ))
+      //   printBranchToBlock(SI.getParent(), Succ, 2);
+      // else
+      //   Out << "    break;\n";
     }
     Out << "  }\n";
+
+    // Get 'sw.exit' MD
+    if (MDNode *MD = SI.getMetadata("sw.exit")) {
+      if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
+        std::string MDStr = MDS->getString().str();
+        // search for the ExitBlock by MDStr
+        for (auto &BB : *SI.getParent()->getParent()) {
+          if (BB.getName() == MDStr) {
+            printBasicBlockNoLabel(&BB);
+            break;
+          }
+        }
+      }
+    }
+
   } else { // model as a series of if statements
     std::cout << "Going into an if condition\n";
     Out << "  ";
@@ -4665,10 +4691,9 @@ void CWriter::visitBranchInstForImpl(BranchInst &I) {
       }
     }
   }
-  
+
   Out << "}\n";
   printBasicBlockNoLabel(EndBlock);
-
 }
 void CWriter::visitBranchInstWhileImpl(BranchInst &I) {
   llvm::errs() << "Found a while loop in branch instruction: "
@@ -4734,6 +4759,12 @@ void CWriter::visitBranchInst(BranchInst &I) {
   // look for "while.break" MD
   if (MDNode *MD = I.getMetadata("while.break")) {
     Out << "break;\n";
+    return;
+  }
+
+  // search `sw.epilog` string in I.getSuccessor(0)->getName()
+  if (I.getSuccessor(0)->getName().find("sw.epilog") != std::string::npos) {
+    // This is the end of a switch case
     return;
   }
 
@@ -5155,12 +5186,6 @@ void CWriter::visitICmpInst(ICmpInst &I) {
   }
 
   bool NeedsClosingParens = false;
-
-  if (Instruction *Inst = dyn_cast<Instruction>(I.getOperand(0))) {
-    llvm::errs() << "Operand(0) opcode: " << Inst->getOpcodeName() << "\n";
-  } else {
-    llvm::errs() << "Operand(0) is not an Instruction\n";
-  }
   if (auto *BinOp = dyn_cast<BinaryOperator>(I.getOperand(0))) {
     visitIcmpInstHandleBinOp(BinOp);
   } else if (auto *Load = dyn_cast<LoadInst>(I.getOperand(0))) {

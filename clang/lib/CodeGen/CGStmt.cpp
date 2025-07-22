@@ -2368,6 +2368,16 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   EmitBlock(SwitchExit.getBlock(), true);
   incrementProfileCounter(&S);
 
+  //add SwitchExit's label name to MD of SwitchInsn
+  llvm::Instruction* SwitchInsnForMetadata = dyn_cast<llvm::Instruction>(SwitchInsn);
+  llvm::MDNode *SwitchExitMD =
+      llvm::MDNode::get(getLLVMContext(),
+                        llvm::MDString::get(getLLVMContext(), SwitchExit.getBlock()->getName()));
+  if (SwitchInsnForMetadata) {
+    SwitchInsnForMetadata->setMetadata("sw.exit", SwitchExitMD);
+  }
+  
+
   // If the switch has a condition wrapped by __builtin_unpredictable,
   // create metadata that specifies that the switch is unpredictable.
   // Don't bother if not optimizing because that metadata would not be used.
