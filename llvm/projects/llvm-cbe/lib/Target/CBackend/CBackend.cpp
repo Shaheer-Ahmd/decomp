@@ -1853,7 +1853,7 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
   Constant *CPV = dyn_cast<Constant>(Operand);
 
   if (CPV && !isa<GlobalValue>(CPV)) {
-    std::cout << "Doing print constant now!\n";
+    llvm::errs() << "Doing print constant now: " << *CPV << "\n";
     printConstant(CPV, Context);
   } else {
     std::cout << "getValueName: " << GetValueName(Operand) << "\n";
@@ -4880,7 +4880,7 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
   bool castIsSigned;
   opcodeNeedsCast(I.getOpcode(), shouldCast, castIsSigned);
 
-  if (I.getType()->isVectorTy() || needsCast || shouldCast) {
+  if (I.getType()->isVectorTy()){ // || needsCast || shouldCast) {
     Type *VTy = I.getOperand(0)->getType();
     unsigned opcode;
     Value *X;
@@ -4943,12 +4943,13 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
 
     // Write out the cast of the instruction's value back to the proper type
     // if necessary.
-    bool NeedsClosingParens = writeInstructionCast(I);
+    // bool NeedsClosingParens = writeInstructionCast(I);
 
     // Certain instructions require the operand to be forced to a specific type
     // so we use writeOperandWithCast here instead of writeOperand. Similarly
     // below for operand 1
-    writeOperandWithCast(I.getOperand(0), I.getOpcode());
+    // writeOperandWithCast(I.getOperand(0), I.getOpcode());
+    writeOperand(I.getOperand(0));
 
     switch (I.getOpcode()) {
     case Instruction::Add:
@@ -4994,9 +4995,11 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
       errorWithMessage("invalid operator type");
     }
 
-    writeOperandWithCast(I.getOperand(1), I.getOpcode());
-    if (NeedsClosingParens)
-      Out << "))";
+    // writeOperandWithCast(I.getOperand(1), I.getOpcode());
+    writeOperand(I.getOperand(1));
+
+    // if (NeedsClosingParens)
+    //   Out << "))";
   }
 }
 
@@ -5186,14 +5189,9 @@ void CWriter::visitICmpInst(ICmpInst &I) {
   }
 
   bool NeedsClosingParens = false;
-  if (auto *BinOp = dyn_cast<BinaryOperator>(I.getOperand(0))) {
-    visitIcmpInstHandleBinOp(BinOp);
-  } else if (auto *Load = dyn_cast<LoadInst>(I.getOperand(0))) {
-    visitIcmpInstHandleLoad(Load);
-  } else {
-    NeedsClosingParens = writeInstructionCast(I);
-    writeOperandWithCast(I.getOperand(0), I);
-  }
+  
+  NeedsClosingParens = writeInstructionCast(I);
+  writeOperandWithCast(I.getOperand(0), I);
 
   // Comparison operator
   switch (I.getPredicate()) {
@@ -5224,16 +5222,9 @@ void CWriter::visitICmpInst(ICmpInst &I) {
     errorWithMessage("invalid icmp predicate");
   }
 
-  // Right-hand side
-  if (auto *BinOp = dyn_cast<BinaryOperator>(I.getOperand(1))) {
-    visitIcmpInstHandleBinOp(BinOp);
-  } else if (auto *Load = dyn_cast<LoadInst>(I.getOperand(1))) {
-    visitIcmpInstHandleLoad(Load);
-  } else {
     writeOperandWithCast(I.getOperand(1), I);
     if (NeedsClosingParens)
       Out << "))";
-  }
 }
 
 void CWriter::visitFCmpInst(FCmpInst &I) {
@@ -5345,20 +5336,38 @@ void CWriter::visitCastInst(CastInst &I) {
 void CWriter::visitSelectInst(SelectInst &I) {
   CurInstr = &I;
 
-  Out << "llvm_select_";
-  printTypeString(Out, I.getType(), false);
-  Out << "(";
-  writeOperand(I.getCondition(), ContextCasted);
-  Out << ", ";
-  writeOperand(I.getTrueValue(), ContextCasted);
-  Out << ", ";
-  writeOperand(I.getFalseValue(), ContextCasted);
-  Out << ")";
-  SelectDeclTypes.insert(I.getType());
+  // Sanity check (optional, but keeps you safe for now)
   cwriter_assert(
       I.getCondition()->getType()->isVectorTy() ==
-      I.getType()->isVectorTy()); // TODO: might be scalarty == vectorty
+      I.getType()->isVectorTy());
+
+  // Use inline ternary operator
+  Out << "(";
+  writeOperand(I.getCondition());
+  Out << " ? ";
+  writeOperand(I.getTrueValue());
+  Out << " : ";
+  writeOperand(I.getFalseValue());
+  Out << ")";
 }
+
+// void CWriter::visitSelectInst(SelectInst &I) {
+//   CurInstr = &I;
+
+//   Out << "llvm_select_";
+//   printTypeString(Out, I.getType(), false);
+//   Out << "(";
+//   writeOperand(I.getCondition(), ContextCasted);
+//   Out << ", ";
+//   writeOperand(I.getTrueValue(), ContextCasted);
+//   Out << ", ";
+//   writeOperand(I.getFalseValue(), ContextCasted);
+//   Out << ")";
+//   SelectDeclTypes.insert(I.getType());
+//   cwriter_assert(
+//       I.getCondition()->getType()->isVectorTy() ==
+//       I.getType()->isVectorTy()); // TODO: might be scalarty == vectorty
+// }
 
 // Returns the macro name or value of the max or min of an integer
 // type (as defined in limits.h).
