@@ -783,9 +783,9 @@ void CodeGenFunction::EmitGotoStmt(const GotoStmt &S) {
     EmitStopPoint(&S);
 
   JumpDest Dest = getJumpDestForLabel(S.getLabel());
-
+  
   assert(Dest.getScopeDepth().encloses(EHStack.stable_begin()) &&
-         "stale jump destination");
+             "stale jump destination");
 
   if (!HaveInsertPoint())
     return;
@@ -794,7 +794,7 @@ void CodeGenFunction::EmitGotoStmt(const GotoStmt &S) {
   llvm::BranchInst *BI = Builder.CreateBr(Dest.getBlock());
   llvm::LLVMContext &Ctx = BI->getContext();
   llvm::MDNode *MD = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ""));
-
+  
   BI->setMetadata("user_introduced", MD);
 
   EmitBranchThroughCleanupImpl(Dest, BI);
@@ -875,6 +875,7 @@ void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
   if (S.getElse())
     ElseBlock = createBasicBlock("if.else");
 
+
   // Prefer the PGO based weights over the likelihood attribute.
   // When the build isn't optimized the metadata isn't used, so don't generate
   // it.
@@ -899,16 +900,28 @@ void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
   // when one if-stmt is nested within another if-stmt so that all of the MC/DC
   // updates are kept linear and consistent.
   llvm::BranchInst *BIForMetadata;
-  if (!CGM.getCodeGenOpts().MCDCCoverage)
+   if (!CGM.getCodeGenOpts().MCDCCoverage)
   // EmitBranchOnBoolExpr(S.getCond(), ThenBlock, ElseBlock, ThenCount, LH);
   {
     llvm::Value *BoolCondVal = EvaluateExprAsBool(S.getCond());
     llvm::BranchInst *BI =
         Builder.CreateCondBr(BoolCondVal, ThenBlock, ElseBlock);
     BIForMetadata = BI;
-  } else {
+    
+  }
+  else {
     llvm::Value *BoolCondVal = EvaluateExprAsBool(S.getCond());
     BIForMetadata = Builder.CreateCondBr(BoolCondVal, ThenBlock, ElseBlock);
+    
+  }
+
+  if (const auto *ElseStmt = S.getElse()) {
+    if (S.isElseIf()) {
+      llvm::LLVMContext &Ctx = CGM.getLLVMContext();
+      llvm::MDString *ElseIfMDStr = llvm::MDString::get(Ctx, "else_if");
+      llvm::MDNode *ElseIfMD = llvm::MDNode::get(Ctx, ElseIfMDStr);
+      BIForMetadata->setMetadata("else_if", ElseIfMD);
+    }
   }
 
   // Emit the 'then' code.
@@ -1028,11 +1041,11 @@ void CodeGenFunction::EmitWhileStmt(const WhileStmt &S,
   // Emit the header for the loop, which will also become
   // the continue target.
   JumpDest LoopHeader = getJumpDestInCurrentScope("while.cond");
-
+  
   // EmitBlock(LoopHeader.getBlock());
   // ====  EmitBlock Inlined to attach Metadata =====
   llvm::BasicBlock *CurBBEmitBlock = Builder.GetInsertBlock();
-  llvm::BasicBlock *BBEmitBlock = LoopHeader.getBlock();
+  llvm::BasicBlock *BBEmitBlock = LoopHeader.getBlock();   
   // == EmitBranch(BB);
   llvm::BasicBlock *TargetEmitBranch = BBEmitBlock;
   if (!CurBBEmitBlock || CurBBEmitBlock->getTerminator()) {
@@ -1052,7 +1065,7 @@ void CodeGenFunction::EmitWhileStmt(const WhileStmt &S,
     CurFn->insert(CurFn->end(), BBEmitBlock);
   Builder.SetInsertPoint(BBEmitBlock);
   // ==============================================
-
+  
   if (CGM.shouldEmitConvergenceTokens())
     ConvergenceTokenStack.push_back(emitConvergenceLoopToken(
         LoopHeader.getBlock(), ConvergenceTokenStack.back()));
@@ -1258,26 +1271,7 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
   // later.
   JumpDest CondDest = getJumpDestInCurrentScope("for.cond");
   llvm::BasicBlock *CondBlock = CondDest.getBlock();
-  // EmitBlock(CondBlock);
-
-  // ====  EmitBlock Inlined to attach Metadata =====
-  llvm::BasicBlock *CurBBEmitBlock = Builder.GetInsertBlock();
-  llvm::BasicBlock *BBEmitBlock = CondBlock;
-  // == EmitBranch(BB);
-  llvm::BasicBlock *TargetEmitBranch = BBEmitBlock;
-  llvm::BranchInst *BIForMetadata;
-  if (!CurBBEmitBlock || CurBBEmitBlock->getTerminator()) {
-  } else {
-    BIForMetadata = Builder.CreateBr(TargetEmitBranch);
-  }
-  Builder.ClearInsertionPoint();
-  // ===
-  if (CurBBEmitBlock && CurBBEmitBlock->getParent())
-    CurFn->insert(std::next(CurBBEmitBlock->getIterator()), BBEmitBlock);
-  else
-    CurFn->insert(CurFn->end(), BBEmitBlock);
-  Builder.SetInsertPoint(BBEmitBlock);
-  // ==============================================
+  EmitBlock(CondBlock);
 
   if (CGM.shouldEmitConvergenceTokens())
     ConvergenceTokenStack.push_back(
@@ -1307,9 +1301,6 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
   BreakContinueStack.push_back(BreakContinue(LoopExit, Continue));
 
   if (S.getCond()) {
-    llvm::LLVMContext &Ctx = CGM.getLLVMContext();
-    llvm::MDNode *MD = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ""));
-    BIForMetadata->setMetadata("for.cond", MD);
     // If the for statement has a condition scope, emit the local variable
     // declaration.
     if (S.getConditionVariable()) {
@@ -1340,6 +1331,85 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
     llvm::Value *BoolCondVal = EvaluateExprAsBool(S.getCond());
     llvm::MDNode *Weights =
         createProfileWeightsForLoop(S.getCond(), getProfileCount(S.getBody()));
+
+    JumpDest LoopExit = getJumpDestInCurrentScope("for.end");
+
+    LexicalScope ForScope(*this, S.getSourceRange());
+
+    if (S.getInit())
+      EmitStmt(S.getInit());
+
+    JumpDest CondDest = getJumpDestInCurrentScope("for.cond");
+    llvm::BasicBlock *CondBlock = CondDest.getBlock();
+    EmitBlock(CondBlock);
+
+    llvm::LLVMContext &Ctx = Builder.getContext();
+
+    // 🔹 Extract loop type
+    std::string LoopType = "Loop Type: for-loop";
+
+    // 🔹 Extract condition details
+    std::string ConditionType = "Condition Type: None";
+    std::string ConditionOperator = "Operator: Unknown";
+
+    if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(S.getCond())) {
+      ConditionType = "Condition Type: BinaryOperator";
+
+      switch (BO->getOpcode()) {
+      case BO_LT:
+        ConditionOperator = "Operator: <";
+        break;
+      case BO_GT:
+        ConditionOperator = "Operator: >";
+        break;
+      case BO_LE:
+        ConditionOperator = "Operator: <=";
+        break;
+      case BO_GE:
+        ConditionOperator = "Operator: >=";
+        break;
+      case BO_EQ:
+        ConditionOperator = "Operator: ==";
+        break;
+      case BO_NE:
+        ConditionOperator = "Operator: !=";
+        break;
+      default:
+        ConditionOperator = "Operator: Unknown";
+        break;
+      }
+    }
+
+    std::string BreakCondition = "Break Condition: None";
+    if (S.getInc()) {
+      BreakCondition = "Break Condition: Increment";
+    }
+
+    llvm::MDNode *LoopMetadata =
+        llvm::MDNode::get(Ctx, {llvm::MDString::get(Ctx, LoopType),
+                                llvm::MDString::get(Ctx, ConditionType),
+                                llvm::MDString::get(Ctx, ConditionOperator),
+                                llvm::MDString::get(Ctx, BreakCondition)});
+
+    if (S.getCond()) {
+      llvm::Value *BoolCondVal = EvaluateExprAsBool(S.getCond());
+      llvm::MDNode *Weights = createProfileWeightsForLoop(
+          S.getCond(), getProfileCount(S.getBody()));
+
+      llvm::BasicBlock *ExitBlock = LoopExit.getBlock();
+      if (ForScope.requiresCleanups())
+        ExitBlock = createBasicBlock("for.cond.cleanup");
+
+      llvm::BasicBlock *ForBody = createBasicBlock("for.body");
+
+      // 🔹 Attach Metadata to the Conditional Branch
+      llvm::BranchInst *CondBranch =
+          Builder.CreateCondBr(BoolCondVal, ForBody, ExitBlock, Weights);
+
+      // ✅ Correct: Attach metadata to branch instruction
+      CondBranch->setMetadata("loop_info", LoopMetadata);
+    }
+
     if (!Weights && CGM.getCodeGenOpts().OptimizationLevel)
       BoolCondVal = emitCondLikelihoodViaExpectIntrinsic(
           BoolCondVal, Stmt::getLikelihood(S.getBody()));
@@ -1369,18 +1439,12 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
     EmitStmt(S.getBody());
   }
 
-  
-
   // If there is an increment, emit it next.
   if (S.getInc()) {
     EmitBlock(Continue.getBlock());
     EmitStmt(S.getInc());
     if (llvm::EnableSingleByteCoverage)
-    incrementProfileCounter(S.getInc());
-    llvm::LLVMContext &Ctx = CGM.getLLVMContext();
-    llvm::MDNode *MD = llvm::MDNode::get(
-        Ctx, llvm::MDString::get(Ctx, Continue.getBlock()->getName()));
-    BIForMetadata->setMetadata("for.inc", MD);
+      incrementProfileCounter(S.getInc());
   }
 
   BreakContinueStack.pop_back();
@@ -1394,18 +1458,9 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
 
   LoopStack.pop();
 
-  
   // Emit the fall-through block.
   EmitBlock(LoopExit.getBlock(), true);
-  
-  // ===== add metadata =======
-  if (BIForMetadata) {
-    llvm::LLVMContext &Ctx = CGM.getLLVMContext();
-    llvm::MDNode *MD = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, LoopExit.getBlock()->getName()));
-    BIForMetadata->setMetadata("for.start", MD);
-  }
-  // ==========================
-  
+
   // When single byte coverage mode is enabled, add a counter to continuation
   // block.
   if (llvm::EnableSingleByteCoverage)
@@ -1600,7 +1655,7 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
   RunCleanupsScope cleanupScope(*this);
   if (const auto *EWC = dyn_cast_or_null<ExprWithCleanups>(RV))
     RV = EWC->getSubExpr();
-
+  
   // If we're in a swiftasynccall function, and the return expression is a
   // call to a swiftasynccall function, mark the call as the musttail call.
   std::optional<llvm::SaveAndRestore<const CallExpr *>> SaveMustTail;
@@ -2367,16 +2422,6 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   // Emit continuation.
   EmitBlock(SwitchExit.getBlock(), true);
   incrementProfileCounter(&S);
-
-  //add SwitchExit's label name to MD of SwitchInsn
-  llvm::Instruction* SwitchInsnForMetadata = dyn_cast<llvm::Instruction>(SwitchInsn);
-  llvm::MDNode *SwitchExitMD =
-      llvm::MDNode::get(getLLVMContext(),
-                        llvm::MDString::get(getLLVMContext(), SwitchExit.getBlock()->getName()));
-  if (SwitchInsnForMetadata) {
-    SwitchInsnForMetadata->setMetadata("sw.exit", SwitchExitMD);
-  }
-  
 
   // If the switch has a condition wrapped by __builtin_unpredictable,
   // create metadata that specifies that the switch is unpredictable.

@@ -4613,15 +4613,35 @@ void CWriter::visitBranchInstIfImpl(BranchInst &I) {
 
     bool isElseNecessary = I.getSuccessor(1) != JoinBB;
     if (isElseNecessary) {
-      Out << "  } else {\n";
-      printBasicBlockNoTerminator(I.getSuccessor(1));
-      if (BranchInst *Br =
-              dyn_cast<BranchInst>(I.getSuccessor(1)->getTerminator())) {
-        visitBranchInst(*Br);
+      BasicBlock *ElseBB = I.getSuccessor(1);
+      bool isElseIf = false;
+      if (BranchInst *ElseBr = dyn_cast<BranchInst>(ElseBB->getTerminator())) {
+        if (ElseBr->getMetadata("else_if")) {
+          isElseIf = true;
+        }
       }
+
+      if (isElseIf) {
+        Out << " } else";
+        InlinedBlocks.insert(ElseBB);
+        visitBranchInstIfImpl(*ElseBr);
+      } else {
+        Out << "  } else {\n";
+        InlinedBlocks.insert(ElseBB);
+        printBasicBlockNoTerminator(ElseBB);
+        if (BranchInst *Br = dyn_cast<BranchInst>(ElseBB->getTerminator())) {
+          visitBranchInst(*Br);
+        }
+        Out << "  }\n";
+      }
+    } else {
+      Out << "  }\n";
     }
-    Out << "  }\n";
-    printBasicBlockNoLabel(JoinBB);
+
+    if (InlinedBlocks.find(JoinBB) == InlinedBlocks.end()) {
+      InlinedBlocks.insert(JoinBB);
+      printBasicBlockNoLabel(JoinBB);
+    }
   } else {
     if (MDNode *MD = I.getMetadata("user_introduced")) {
       printBranchToBlock(I.getParent(), I.getSuccessor(0), 0);

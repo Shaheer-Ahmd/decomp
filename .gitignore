@@ -6,6 +6,13 @@
 !clang/lib/
 !clang/lib/CodeGen/
 !clang/lib/CodeGen/*
+!clang/lib/Parse/
+!clang/lib/Parse/*
+
+!clang/include/
+!clang/include/clang/
+!clang/include/clang/AST/
+!clang/include/clang/AST/*
 
 !llvm/
 !llvm/projects/
