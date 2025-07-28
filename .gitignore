@@ -3,9 +3,17 @@
 
 # Allow directories leading to the files you want to keep
 !clang/
+!clang/include/
+!clang/include/clang/
+!clang/include/clang/AST/
+!clang/include/clang/AST/Stmt.h
+
 !clang/lib/
 !clang/lib/CodeGen/
 !clang/lib/CodeGen/*
+!clang/lib/Parse/
+!clang/lib/Parse/ParseStmt.cpp
+
 
 !llvm/
 !llvm/projects/
