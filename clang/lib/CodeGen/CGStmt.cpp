@@ -911,6 +911,15 @@ void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
     BIForMetadata = Builder.CreateCondBr(BoolCondVal, ThenBlock, ElseBlock);
   }
 
+  if (const auto *ElseStmt = S.getElse()) {
+    if (S.isElseIf()) {
+      llvm::LLVMContext &Ctx = CGM.getLLVMContext();
+      llvm::MDString *ElseIfMDStr = llvm::MDString::get(Ctx, "else_if");
+      llvm::MDNode *ElseIfMD = llvm::MDNode::get(Ctx, ElseIfMDStr);
+      BIForMetadata->setMetadata("else_if", ElseIfMD);
+    }
+  }
+
   // Emit the 'then' code.
   EmitBlock(ThenBlock);
   if (llvm::EnableSingleByteCoverage)
