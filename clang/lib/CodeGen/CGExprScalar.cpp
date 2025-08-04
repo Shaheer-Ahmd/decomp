@@ -4848,36 +4848,6 @@ Value *ScalarExprEmitter::EmitCompare(const BinaryOperator *E,
       Result = Builder.CreateICmp(UICmpOpc, LHS, RHS, "cmp");
     }
 
-    // ======== Begin custom metadata handling ========
-    if (auto *I = llvm::dyn_cast<llvm::Instruction>(Result)) {
-      llvm::LLVMContext &Ctx = CGF.getLLVMContext();
-      llvm::MDString *LHSMD = nullptr, *RHSMD = nullptr;
-
-      if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(LHS)) {
-        if (auto *LNode = LI->getMetadata("load_info"))
-          LHSMD = llvm::dyn_cast<llvm::MDString>(LNode->getOperand(0));
-      }
-
-      if (auto *RI = llvm::dyn_cast<llvm::LoadInst>(RHS)) {
-        if (auto *RNode = RI->getMetadata("load_info"))
-          RHSMD = llvm::dyn_cast<llvm::MDString>(RNode->getOperand(0));
-      }
-
-      std::string Combined;
-      if (LHSMD)
-        Combined += LHSMD->getString().str();
-      if (RHSMD) {
-        if (!Combined.empty())
-          Combined += "; ";
-        Combined += RHSMD->getString().str();
-      }
-
-      llvm::MDNode *Meta = llvm::MDNode::get(
-          Ctx,
-          llvm::MDString::get(Ctx, Combined.empty() ? "<none>" : Combined));
-      I->setMetadata("new_if_metadata", Meta);
-    }
-    // ======== End custom metadata handling ========
 
     if (LHSTy->isVectorType())
       return Builder.CreateSExt(Result, ConvertType(E->getType()), "sext");
