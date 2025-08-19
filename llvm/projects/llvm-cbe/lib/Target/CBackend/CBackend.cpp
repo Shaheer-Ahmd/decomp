@@ -4386,14 +4386,26 @@ void CWriter::printBasicBlock(BasicBlock *BB) {
 
     if (!isInlinableInst(*II) && !isDirectAlloca(&*II)) {
       Out << "  ";
-      if (!isEmptyType(II->getType()) && !isInlineAsm(*II)) {
+      
+      // bool suppressAssign = isa<CallInst>(&*II);
+      // if (isa<CallInst>(&*II)) {
+      //   CallInst &CI = cast<CallInst>(*II);
+      //   if (CI.getNumUses() != 0)
+      //     suppressAssign = true;
+      // }
+
+      if (!isa<CallInst>(&*II) && !isEmptyType(II->getType()) && !isInlineAsm(*II)) {
         if (canDeclareLocalLate(*II)) {
           printTypeName(Out, II->getType(), false) << ' ';
         }
         Out << GetValueName(&*II) << " = ";
       }
       writeInstComputationInline(*II);
-      Out << ";\n";
+
+      if (isa<CallInst>(&*II) && cast<CallInst>(*II).getNumUses() != 0)
+        continue; // closing semicolon will come from MD
+      
+      Out << ";\n"; 
     }
   }
 
@@ -4439,13 +4451,6 @@ void CWriter::visitReturnInst(ReturnInst &I) {
   Out << "  return";
   if (I.getNumOperands()) {
     Out << ' ';
-    // check I.getOperand(0) can be casted to a Load inst
-    if (LoadInst *LI = dyn_cast<LoadInst>(I.getOperand(0))) {
-      // If the operand is a load, we need to write the value of the load
-      // instead of the pointer.
-      Out << GetValueName(LI->getPointerOperand()) << ";\n";
-      return;
-    }
     writeOperand(I.getOperand(0), ContextCasted);
   }
   Out << ";\n";
@@ -5688,6 +5693,11 @@ bool CWriter::lowerIntrinsics(Function &F) {
 
 void CWriter::visitCallInst(CallInst &I) {
   CurInstr = &I;
+  bool resultUsed = (I.getNumUses() != 0);
+  if (resultUsed) {
+    llvm::errs() << "CallInst with result used: " << I << "\n";
+    return;
+  }
 
   if (isa<InlineAsm>(I.getCalledOperand()))
     return visitInlineAsm(I);

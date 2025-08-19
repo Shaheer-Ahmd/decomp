@@ -2765,6 +2765,26 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
 
   setAddrOfLocalVar(&D, DeclPtr);
 
+  setAddrOfLocalVar(&D, DeclPtr);
+
+  // 🔹 Attach custom SSA metadata to the parameter's alloca
+  if (llvm::Value *Var = AllocaPtr.getPointer()) {
+    if (llvm::Instruction *I = llvm::dyn_cast<llvm::Instruction>(Var)) {
+      llvm::LLVMContext &Ctx = getLLVMContext();
+
+      static std::map<std::string, int> VariableVersionTracker;
+      std::string VarName = D.getNameAsString();
+      std::string VarType = D.getType().getAsString();
+      int Version = VariableVersionTracker[VarName]++;
+      std::string SSAInfo =
+          VarName + " : " + VarType + " : SSA_" + std::to_string(Version);
+
+      llvm::MDNode *SSAMetadata =
+          llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, SSAInfo));
+      I->setMetadata("ssa_info", SSAMetadata);
+    }
+  }
+
   // Emit debug info for param declarations in non-thunk functions.
   if (CGDebugInfo *DI = getDebugInfo()) {
     if (CGM.getCodeGenOpts().hasReducedDebugInfo() && !CurFuncIsThunk &&
