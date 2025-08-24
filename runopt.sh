@@ -1,0 +1,1 @@
+./bin/opt -S -passes='instcombine,simplifycfg,dce' ./demotest/main.ll -o ./demotest/main_opt.ll

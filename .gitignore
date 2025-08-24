@@ -24,4 +24,6 @@
 !llvm/projects/llvm-cbe/lib/Target/CBackend/CBackend.cpp
 !llvm/projects/llvm-cbe/lib/Target/CBackend/CBackend.h
 
+!/run*.sh
+
 !/.gitignore

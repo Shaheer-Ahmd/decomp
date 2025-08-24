@@ -1,0 +1,1 @@
+opt -opaque-pointers -S -mem2reg ./demotest/main.ll -o ./demotest/main.ll
