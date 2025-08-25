@@ -24,6 +24,11 @@
 !llvm/projects/llvm-cbe/lib/Target/CBackend/CBackend.cpp
 !llvm/projects/llvm-cbe/lib/Target/CBackend/CBackend.h
 
+!llvm/lib/
+!llvm/lib/Transforms/
+!llvm/lib/Transforms/Utils/
+!llvm/lib/Transforms/Utils/PromoteMemoryToRegister.cpp
+
 !/run*.sh
 
 !/.gitignore

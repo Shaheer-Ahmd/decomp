@@ -38,6 +38,7 @@
 #include <optional>
 #include <set>
 #include <variant>
+#include <string>
 
 #include "IDMap.h"
 
@@ -237,14 +238,21 @@ private:
     // (also implies ContextCasted)
   };
 
+  struct writeOperandCustomArgs {
+    bool wrapInParens = true;
+    std::string metadata;
+    writeOperandCustomArgs(bool w = true, std::string m = "")
+        : wrapInParens(w), metadata(std::move(m)) {}
+  };
+
   void writeOperandDeref(Value *Operand);
-  void writeOperand(Value *Operand,
-                    enum OperandContext Context = ContextNormal,
-                  bool wrapInParens = true);
+  void
+  writeOperand(Value *Operand, enum OperandContext Context = ContextNormal,
+               writeOperandCustomArgs customArgs = writeOperandCustomArgs());
   void writeInstComputationInline(Instruction &I);
-  void writeOperandInternal(Value *Operand,
-                            enum OperandContext Context = ContextNormal,
-                            bool wrapInParens = true);
+  void writeOperandInternal(
+      Value *Operand, enum OperandContext Context = ContextNormal,
+      writeOperandCustomArgs customArgs = writeOperandCustomArgs());
   void writeOperandWithCast(Value *Operand, unsigned Opcode);
   void writeVectorOperandWithCast(Value *Operand, unsigned Index,
                                   unsigned Opcode);

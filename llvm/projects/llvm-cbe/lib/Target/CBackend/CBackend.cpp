@@ -1771,7 +1771,6 @@ std::string CWriter::GetValueName(const Value *Operand) {
   std::string Name{Operand->getName()};
   if (Name.empty()) { // Assign unique names to local temporaries.
     unsigned No = AnonValueNumbers.getOrInsert(Operand);
-    std::cout << "Name was empty, now assigning: _" << No << "\n";
 
     Name = "_" + utostr(No);
     if (!TheModule->getNamedValue(Name)) {
@@ -1831,8 +1830,7 @@ void CWriter::writeInstComputationInline(Instruction &I) {
     Out << ")&" << mask << ")";
 }
 
-void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
-                                   bool wrapInParens) {
+void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context, writeOperandCustomArgs customArgs) {
   // Load Inst: source
   if (LoadInst *LI = dyn_cast<LoadInst>(Operand)) {
     Out << GetValueName(LI->getPointerOperand());
@@ -1841,28 +1839,29 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
   if (Instruction *I = dyn_cast<Instruction>(Operand))
     // Should we inline this instruction to build a tree?
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
-      std::cout << "isInlineableInst && !isDirectAlloca\n";
-      if (wrapInParens)
+      if (customArgs.wrapInParens)
         Out << '(';
       writeInstComputationInline(*I);
-      if (wrapInParens)
+      if (customArgs.wrapInParens)
         Out << ')';
       return;
     }
 
   Constant *CPV = dyn_cast<Constant>(Operand);
-
   if (CPV && !isa<GlobalValue>(CPV)) {
-    llvm::errs() << "Doing print constant now: " << *CPV << "\n";
     printConstant(CPV, Context);
   } else {
-    std::cout << "getValueName: " << GetValueName(Operand) << "\n";
-    Out << GetValueName(Operand);
+    if (customArgs.metadata != "") {
+      llvm::errs() << "For operand " << *Operand << " got customArgs.metadata " << customArgs.metadata << "\n";
+      Out << customArgs.metadata;
+    } else {
+      Out << GetValueName(Operand);
+    }
   }
 }
 
 void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
-                           bool wrapInParens) {
+                           writeOperandCustomArgs customArgs) {
   std::optional<Type *> InnerType = tryGetTypeOfAddressExposedValue(Operand);
   bool isAddressImplicit = InnerType.has_value();
   // Global variables are referenced as their addresses by llvm
@@ -1875,9 +1874,8 @@ void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
     else
       Out << "((void*)&";
   }
-  std::cout << "writeOperandInternal called in writeOperand\n";
-  writeOperandInternal(Operand, Context, wrapInParens);
-
+  writeOperandInternal(Operand, Context, customArgs);
+  // customArgs.metadata is available for future use
   if (isAddressImplicit)
     Out << ')';
 }
@@ -4130,7 +4128,6 @@ void CWriter::printBasicBlockNoLabel(BasicBlock *BB) {
         if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
           std::string MDStr = MDS->getString().str();
           keyType = Key;
-          std::cout << Key << " Metadata found: " << MDStr << "\n";
 
           // skipInstruction = true;
           if (Key == "load_info") {
@@ -4144,7 +4141,6 @@ void CWriter::printBasicBlockNoLabel(BasicBlock *BB) {
           if (Key == "store_info") {
             skipInstruction = true;
             std::string storeInfo = MDS->getString().str();
-            std::cout << "Original metadata String: " << storeInfo << "\n";
             // remove .addr from the store_info string such that a.addr = b.addr
             // becomes a = b
             storeInfo = std::regex_replace(
@@ -4164,8 +4160,6 @@ void CWriter::printBasicBlockNoLabel(BasicBlock *BB) {
                   temporary_string.substr(temporary_string.find("=") + 1);
               if (lhs == rhs) {
                 // store_info string is redundant
-                std::cout << "Skipping redundant store_info string: "
-                          << storeInfo << "\n";
                 break;
               }
             }
@@ -4174,7 +4168,6 @@ void CWriter::printBasicBlockNoLabel(BasicBlock *BB) {
           }
           if (opCode == "alloca") {
             skipInstruction = true;
-            std::cout << "Skipping alloca instruction\n";
             break;
           }
         }
@@ -4183,8 +4176,6 @@ void CWriter::printBasicBlockNoLabel(BasicBlock *BB) {
     if (skipInstruction) {
       continue;
     } else {
-      std::cout << "keyType: " << keyType << "\n";
-      std::cout << "Type of instruction: " << II->getOpcodeName() << "\n";
     }
 
     if (!isInlinableInst(*II) && !isDirectAlloca(&*II)) {
@@ -4194,12 +4185,10 @@ void CWriter::printBasicBlockNoLabel(BasicBlock *BB) {
           printTypeName(Out, II->getType(), false) << ' ';
         }
         Out << GetValueName(&*II) << " = ";
-        std::cout << GetValueName(&*II) << " =  <some value>\n";
       }
       writeInstComputationInline(*II);
       Out << ";\n";
     }
-    std::cout << keyType << ": printBasicBlock: " << GetValueName(&*II) << "\n";
   }
 
   // Don't emit prefix or suffix for the terminator.
@@ -4242,7 +4231,6 @@ void CWriter::printBasicBlockNoTerminator(BasicBlock *BB, bool isForIncBlock) {
         if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
           std::string MDStr = MDS->getString().str();
           keyType = Key;
-          std::cout << Key << " Metadata found: " << MDStr << "\n";
 
           // skipInstruction = true;
           if (Key == "load_info") {
@@ -4256,7 +4244,6 @@ void CWriter::printBasicBlockNoTerminator(BasicBlock *BB, bool isForIncBlock) {
           if (Key == "store_info") {
             skipInstruction = true;
             std::string storeInfo = MDS->getString().str();
-            std::cout << "Original metadata String: " << storeInfo << "\n";
             // remove .addr from the store_info string such that a.addr = b.addr
             // becomes a = b
             storeInfo = std::regex_replace(
@@ -4276,8 +4263,6 @@ void CWriter::printBasicBlockNoTerminator(BasicBlock *BB, bool isForIncBlock) {
                   temporary_string.substr(temporary_string.find("=") + 1);
               if (lhs == rhs) {
                 // store_info string is redundant
-                std::cout << "Skipping redundant store_info string: "
-                          << storeInfo << "\n";
                 break;
               }
             }
@@ -4296,9 +4281,6 @@ void CWriter::printBasicBlockNoTerminator(BasicBlock *BB, bool isForIncBlock) {
     }
     if (skipInstruction) {
       continue;
-    } else {
-      std::cout << "keyType: " << keyType << "\n";
-      std::cout << "Type of instruction: " << II->getOpcodeName() << "\n";
     }
 
     if (!isInlinableInst(*II) && !isDirectAlloca(&*II)) {
@@ -4308,12 +4290,10 @@ void CWriter::printBasicBlockNoTerminator(BasicBlock *BB, bool isForIncBlock) {
           printTypeName(Out, II->getType(), false) << ' ';
         }
         Out << GetValueName(&*II) << " = ";
-        std::cout << GetValueName(&*II) << " =  <some value>\n";
       }
       writeInstComputationInline(*II);
       Out << ";\n";
     }
-    std::cout << keyType << ": printBasicBlock: " << GetValueName(&*II) << "\n";
   }
 }
 
@@ -4506,7 +4486,6 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
     }
 
   } else { // model as a series of if statements
-    std::cout << "Going into an if condition\n";
     Out << "  ";
     for (SwitchInst::CaseIt i = SI.case_begin(), e = SI.case_end(); i != e;
          ++i) {
@@ -4672,7 +4651,7 @@ void CWriter::visitBranchInstForImpl(BranchInst &I) {
   if (MDNode *MD = I.getMetadata("for.cond")) {
     hasCondBlock = true;
     printBasicBlockNoTerminator(I.getSuccessor(0));
-    writeOperand(CondBr->getCondition(), ContextCasted, false);
+    writeOperand(CondBr->getCondition(), ContextCasted, writeOperandCustomArgs(false));
   }
 
   Out << ";";
@@ -4722,8 +4701,6 @@ void CWriter::visitBranchInstForImpl(BranchInst &I) {
   printBasicBlockNoLabel(EndBlock);
 }
 void CWriter::visitBranchInstWhileImpl(BranchInst &I) {
-  llvm::errs() << "Found a while loop in branch instruction: "
-               << I.getSuccessor(0)->getName() << "\n";
 
   // UC -> while.cond -> while.body UC -> while.cond ....
   //               -> while.end UC
@@ -4801,6 +4778,7 @@ void CWriter::visitBranchInst(BranchInst &I) {
 // blocks.  We now need to copy these temporary values into the REAL value for
 // the PHI.
 void CWriter::visitPHINode(PHINode &I) {
+  return;
   CurInstr = &I;
 
   writeOperand(&I);
@@ -4935,12 +4913,38 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
     // Write out the cast of the instruction's value back to the proper type
     // if necessary.
     // bool NeedsClosingParens = writeInstructionCast(I);
+    int OperandNumber; std::string OperandName;
+    if(Instruction* Inst = dyn_cast<Instruction>(&I)) {
+      if (MDNode *MD = Inst->getMetadata("orig_loads")) {
+        if (MDString *MDStr = dyn_cast<MDString>(MD->getOperand(0))) {
+          llvm::errs() << "Metadata `original_loads` on BinaryOperator Instruction: \n";
+          llvm::errs() << "  " << *MDStr << "\n";
+
+          // MDStr ~ <OperandNumber>:<OperandName>
+          std::string MDStrValue = MDStr->getString().str();
+          size_t colon = MDStrValue.find(":");
+          if (colon != std::string::npos) {
+            OperandName = MDStrValue.substr(colon + 1);
+            OperandNumber = std::stoi(MDStrValue.substr(0, colon));
+            llvm::errs() << "Parsed metadata - OperandNumber: " << OperandNumber
+                          << ", OperandName: " << OperandName << "\n";
+            
+          }
+        }
+      }
+    } else {
+      llvm::errs() << "BinaryOperator uncastable to inst: " << I.getName() << "\n";
+    }
 
     // Certain instructions require the operand to be forced to a specific type
     // so we use writeOperandWithCast here instead of writeOperand. Similarly
     // below for operand 1
     // writeOperandWithCast(I.getOperand(0), I.getOpcode());
-    writeOperand(I.getOperand(0));
+    struct writeOperandCustomArgs args = writeOperandCustomArgs(); 
+    if (OperandNumber == 0) {
+      args.metadata = OperandName;
+    }
+    writeOperand(I.getOperand(0), ContextNormal, args);
 
     switch (I.getOpcode()) {
     case Instruction::Add:
@@ -4987,8 +4991,11 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
     }
 
     // writeOperandWithCast(I.getOperand(1), I.getOpcode());
-    writeOperand(I.getOperand(1));
-
+    args = writeOperandCustomArgs(); 
+    if (OperandNumber == 1) {
+      args.metadata = OperandName;
+    }
+    writeOperand(I.getOperand(1), ContextNormal, args);
     // if (NeedsClosingParens)
     //   Out << "))";
   }
@@ -5695,7 +5702,6 @@ void CWriter::visitCallInst(CallInst &I) {
   CurInstr = &I;
   bool resultUsed = (I.getNumUses() != 0);
   if (resultUsed) {
-    llvm::errs() << "CallInst with result used: " << I << "\n";
     return;
   }
 
@@ -6191,9 +6197,7 @@ void CWriter::visitAllocaInst(AllocaInst &I) {
   CurInstr = &I;
 
   headerUseBuiltinAlloca();
-  std::cout << "visitAllocainst\n";
   Out << '(';
-  // std::cout << "Calling printTypeName in visitAllocaInst\n";
   printTypeName(Out, I.getType());
   Out << ") alloca(sizeof(";
   printTypeName(Out, I.getAllocatedType());
@@ -6229,7 +6233,6 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
   ++I;
   if (!isConstantNull(FirstOp)) {
     Out << "(&((";
-    // std::cout << "Calling printTypeName in printGEPExpression\n";
     printTypeName(Out, IntoT);
     Out << "*)";
     writeOperand(Ptr);
@@ -6244,7 +6247,6 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
       Out << '(';
       if (SourceType && SourceType.value() != ExposedType.value()) {
         Out << "(";
-        // std::cout << "Calling printTypeName in printGEPExpression\n";
         printTypeName(Out, SourceType.value());
         Out << "*)";
       }
@@ -6319,7 +6321,6 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
   llvm::raw_string_ostream operandStream(operandStr);
   Operand->print(operandStream);
   operandStream.flush();
-  std::cout << "Operand str: " << operandStr << "\n";
   auto ActualType = tryGetTypeOfAddressExposedValue(Operand);
   if (ActualType.has_value() && !IsVolatile) {
     if (ActualType.value() != OperandType) {
@@ -6358,7 +6359,6 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
     printTypeName(Out, OperandType, false);
     Out << "*)";
   }
-  std::cout << "Calling writeOperand in writeMemoryAccess\n";
   writeOperand(Operand);
 
   if (IsUnaligned) {
@@ -6368,7 +6368,6 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
 
 void CWriter::visitLoadInst(LoadInst &I) {
   CurInstr = &I;
-  std::cout << "VisitLoadInst: ";
   writeMemoryAccess(I.getOperand(0), I.getType(), I.isVolatile(),
                     I.getAlign().value());
 }
@@ -6376,7 +6375,6 @@ void CWriter::visitLoadInst(LoadInst &I) {
 void CWriter::visitStoreInst(StoreInst &I) {
   CurInstr = &I;
 
-  std::cout << "VisitStoreInst: \n";
   writeMemoryAccess(I.getPointerOperand(), I.getOperand(0)->getType(),
                     I.isVolatile(), I.getAlign().value());
   Out << " = ";
