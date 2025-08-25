@@ -37,8 +37,8 @@
 
 #include <optional>
 #include <set>
-#include <variant>
 #include <string>
+#include <variant>
 
 #include "IDMap.h"
 
@@ -250,15 +250,17 @@ private:
   writeOperand(Value *Operand, enum OperandContext Context = ContextNormal,
                writeOperandCustomArgs customArgs = writeOperandCustomArgs());
   void writeInstComputationInline(Instruction &I);
-  void writeOperandInternal(
-      Value *Operand, enum OperandContext Context = ContextNormal,
+  void writeOperandInternal(Value *Operand, enum OperandContext Context = ContextNormal, writeOperandCustomArgs customArgs = writeOperandCustomArgs());
+  void writeOperandWithCast(
+      Value *Operand, unsigned Opcode,
       writeOperandCustomArgs customArgs = writeOperandCustomArgs());
-  void writeOperandWithCast(Value *Operand, unsigned Opcode);
   void writeVectorOperandWithCast(Value *Operand, unsigned Index,
                                   unsigned Opcode);
   void opcodeNeedsCast(unsigned Opcode, bool &shouldCast, bool &castIsSigned);
 
-  void writeOperandWithCast(Value *Operand, ICmpInst &I);
+  void writeOperandWithCast(
+      Value *Operand, ICmpInst &I,
+      writeOperandCustomArgs customArgs = writeOperandCustomArgs());
   bool writeInstructionCast(Instruction &I);
   void writeMemoryAccess(Value *Operand, Type *OperandType, bool IsVolatile,
                          unsigned Alignment);
@@ -279,21 +281,17 @@ private:
   void printFloatingPointConstants(const Constant *C);
 
   void printFunction(Function &);
-  void printBasicBlock(BasicBlock *BB);
-  void printBasicBlock(BasicBlock *BB, bool inlineBlock);
-  void printBasicBlockNoLabel(BasicBlock *BB);
-  void printBasicBlockNoTerminator(BasicBlock *BB, bool isForIncBlock = false);
-  void printBasicBlockWithIndent(BasicBlock *BB, int indentLevel);
-  void printStructuredBlock(BasicBlock *BB, BasicBlock *StopAt, int indent);
-  void printBasicBlockInstructionsOnly(BasicBlock *BB, int indentLevel,
-                                       bool enableDebug);
-  void printBasicBlockSequence(BasicBlock *startBB, BasicBlock *stopBB,
-                               int indentLevel, bool enableDebug);
-  void printBasicBlockUntil(BasicBlock *BB, BasicBlock *StopAtBlock);
-  void printUntilJoin(BasicBlock *CurrentBB, BasicBlock *JoinBB,
-                      std::set<BasicBlock *> &Visited);
-  void printRegionUntilPostDominator(BasicBlock *StartBB, BasicBlock *JoinBB,
-                                     unsigned IndentLevel);
+
+  struct printBasicBlockCustomArgs {
+    bool isForIncBlock = false;
+    bool noTerminator = false;
+    bool noLabel = true;
+    printBasicBlockCustomArgs(bool i = false, bool nT = false, bool nL = true)
+        : isForIncBlock(i), noTerminator(nT), noLabel(nL) {}
+  };
+
+  void printBasicBlock(BasicBlock *BB, printBasicBlockCustomArgs customArgs =
+                                           printBasicBlockCustomArgs());
   void printLoop(Loop *L);
 
   void printCast(unsigned opcode, Type *SrcTy, Type *DstTy);
