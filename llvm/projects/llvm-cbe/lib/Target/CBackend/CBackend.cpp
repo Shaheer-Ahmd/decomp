@@ -59,8 +59,13 @@ namespace llvm_cbe {
 
 using namespace llvm;
 
-static void extractOrigUses(Instruction &I, std::string &FirstOperandName,
+static void extractOrigUsesDouble(Instruction &I, std::string &FirstOperandName,
                             std::string &SecondOperandName);
+
+static void extractOrigUsesSingle(Instruction &I, std::string &OperandName);
+
+static BasicBlock* SearchBasicBlockByLabel(Instruction &I, std::string key);
+
 static cl::opt<bool> DeclareLocalsLate(
     "cbe-declare-locals-late",
     cl::desc("C backend: Declare local variables at the point they're first "
@@ -1835,7 +1840,24 @@ void CWriter::writeInstComputationInline(Instruction &I) {
 void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
                                    writeOperandCustomArgs customArgs) {
 
-  llvm::errs() << "[writeOperand] " << *Operand;
+  llvm::errs() << "[writeOperandInternal] " << *Operand;
+  if (customArgs.metadata != "") {
+    llvm::errs() << " For operand " << *Operand << " got customArgs.metadata "
+    << customArgs.metadata << "\n";
+    Out << customArgs.metadata;
+    return;
+  }
+  if (PHINode *PN = dyn_cast<PHINode>(Operand)) {
+    llvm::errs() << " was a phi node ";
+    if (MDNode *MDCond = PN->getMetadata("multiple_conds")) {
+      llvm::errs() << " using multiple_conds\n";
+        if (MDString *MDSCond = dyn_cast<MDString>(MDCond->getOperand(0))) {
+          Out << "(" << MDSCond->getString().str() << ")";
+        }
+        return;
+      }
+  }
+
   // Load Inst: source
   if (LoadInst *LI = dyn_cast<LoadInst>(Operand)) {
     llvm::errs() << " was a load instruction\n";
@@ -1854,12 +1876,7 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
       return;
     }
 
-  if (customArgs.metadata != "") {
-    llvm::errs() << " For operand " << *Operand << " got customArgs.metadata "
-                << customArgs.metadata << "\n";
-    Out << customArgs.metadata;
-    return;
-  }
+  
 
   Constant *CPV = dyn_cast<Constant>(Operand);
   if (CPV && !isa<GlobalValue>(CPV)) {
@@ -1875,7 +1892,7 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
   llvm::errs() << " what the fuck\n";
 }
 
-static void extractOrigUses(Instruction &I, std::string &FirstOperandName,
+static void extractOrigUsesDouble(Instruction &I, std::string &FirstOperandName,
                             std::string &SecondOperandName) {
   if (Instruction *Inst = dyn_cast<Instruction>(&I)) {
     if (MDNode *MD = Inst->getMetadata("orig_loads")) {
@@ -1920,6 +1937,32 @@ static void extractOrigUses(Instruction &I, std::string &FirstOperandName,
       }
     }
   }
+}
+
+static void extractOrigUsesSingle(Instruction &I, std::string &OperandName) {
+  if (Instruction *Inst = dyn_cast<Instruction>(&I)) {
+    if (MDNode *MD = Inst->getMetadata("orig_loads")) {
+      if (MDString *MDStr = dyn_cast<MDString>(MD->getOperand(0))) {
+        // MDStr ~ <OperandNumber>:<OperandName>
+        std::string MDStrValue = MDStr->getString().str();
+        size_t colon = MDStrValue.find(":");
+        if (colon != std::string::npos) {
+          OperandName = MDStrValue.substr(colon + 1);
+        }
+      }  
+    }
+  }
+}
+
+static BasicBlock *SearchBasicBlockByLabel(Instruction &I, std::string key) {
+  BasicBlock *ResultBB = nullptr;
+  for (auto &BB : *I.getParent()->getParent()) {
+    if (BB.getName() == key) {
+      ResultBB = &BB;
+      break;
+    }
+  }
+  return ResultBB;
 }
 
 void CWriter::writeOperand(Value *Operand, enum OperandContext Context,
@@ -4038,7 +4081,7 @@ void CWriter::printFunction(Function &F) {
         Out << "__PREFIXALIGN__(" << Alignment << ") ";
       }
       bool metadata_extracted = false;
-      // Try extracting type from metadata
+      // All allocas should have ssa_info always (hopefully)
       if (MDNode *VarInfo =
               AI->getMetadata("ssa_info")) { // extract metadata info about
                                              // variable declarations - bilal
@@ -4090,6 +4133,12 @@ void CWriter::printFunction(Function &F) {
     else if (!isEmptyType(I->getType()) && !isInlinableInst(*I)) {
       if (isa<PHINode>(*I))
         continue;
+      
+      if (isa<CallInst>(*I))
+        continue;
+
+      if (isa<BinaryOperator>(*I))
+        continue;
 
       // === Skip load instructions entirely ===
       if (isa<LoadInst>(*I)) {
@@ -4131,13 +4180,28 @@ void CWriter::printFunction(Function &F) {
 
   // print the basic blocks
   for (Function::iterator BB = F.begin(), E = F.end(); BB != E; ++BB) {
+    llvm::errs() << "[printFunction] Checking " << BB->getName().str() << "\n";
+    std::string labelName = BB->getName().str();
+    if (InlinedBlocks.count(&*BB)) {
+      llvm::errs() << "[printFunction] Skipping " << labelName << "\n";
+        continue;
+    }
+    // skip land. or lor.
+    // if (labelName.find("land.lhs") != std::string::npos ||
+    //     labelName.find("land.rhs") != std::string::npos ||
+    //     labelName.find("lor.lhs") != std::string::npos ||
+    //     labelName.find("lor.rhs") != std::string::npos) {
+    if (labelName.find("land.") != std::string::npos ||
+        labelName.find("lor.") != std::string::npos) {
+      llvm::errs() << "[printFunction] Skipping " << labelName << "\n";
+      continue;
+    }
     if (Loop *L = LI->getLoopFor(&*BB)) {
       if (L->getHeader() == &*BB && L->getParentLoop() == nullptr)
         printLoop(L);
     } else {
-      if (InlinedBlocks.count(&*BB))
-        continue;
-      printBasicBlock(&*BB);
+      llvm::errs() << "[printFunction] printBB for " << labelName << "\n";
+      printBasicBlock(&*BB, printBasicBlockCustomArgs(false, false, true));
     }
   }
 
@@ -4329,12 +4393,6 @@ void CWriter::printBasicBlock(BasicBlock *BB,
     if (!isInlinableInst(*II) && !isDirectAlloca(&*II)) {
       Out << "  ";
 
-      // bool suppressAssign = isa<CallInst>(&*II);
-      // if (isa<CallInst>(&*II)) {
-      //   CallInst &CI = cast<CallInst>(*II);
-      //   if (CI.getNumUses() != 0)
-      //     suppressAssign = true;
-      // }
       bool originalEmitAssign =
           !isEmptyType(II->getType()) && !isInlineAsm(*II);
       bool EmitAssign =
@@ -4358,8 +4416,10 @@ void CWriter::printBasicBlock(BasicBlock *BB,
     }
   }
 
-  if (!customArgs.noTerminator)
+  if (!customArgs.noTerminator) {
+    llvm::errs() << "[printBasicBlock] visiting terminator for " << BB->getName() << "\n";
     visit(*BB->getTerminator());
+  }
 }
 
 // Specific Instruction type classes... note that all of the casts are
@@ -4400,7 +4460,14 @@ void CWriter::visitReturnInst(ReturnInst &I) {
   Out << "  return";
   if (I.getNumOperands()) {
     Out << ' ';
-    writeOperand(I.getOperand(0), ContextCasted);
+
+    std::string OperandName = "";
+    extractOrigUsesSingle(I, OperandName);
+    struct writeOperandCustomArgs args = writeOperandCustomArgs();
+    if (OperandName != "")
+      args.metadata = OperandName;
+
+    writeOperand(I.getOperand(0), ContextCasted, args);
   }
   Out << ";\n";
 }
@@ -4417,7 +4484,12 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
     Out << "\n";
   } else if (NumBits <= 64) { // model as a switch statement
     Out << "  switch (";
-    writeOperand(Cond);
+    std::string OperandName = "";
+    extractOrigUsesSingle(SI, OperandName);
+    struct writeOperandCustomArgs args = writeOperandCustomArgs();
+    if (OperandName != "")
+      args.metadata = OperandName;
+    writeOperand(Cond, ContextNormal, args);
     Out << ") {\n  default:\n";
     printBasicBlock(SI.getDefaultDest(),
                     printBasicBlockCustomArgs(false, false, true));
@@ -4532,18 +4604,14 @@ void CWriter::printBranchToBlock(BasicBlock *CurBB, BasicBlock *Succ,
   }
 }
 
+
 void CWriter::visitBranchInstIfImpl(BranchInst &I) {
   if (I.isConditional()) {
     Out << "  if ";
     writeOperand(I.getCondition(), ContextCasted);
     Out << " {\n";
 
-    printBasicBlock(I.getSuccessor(0), printBasicBlockCustomArgs(false, true));
-    if (BranchInst *Br =
-            dyn_cast<BranchInst>(I.getSuccessor(0)->getTerminator())) {
-      visitBranchInst(*Br);
-    }
-
+    printBasicBlock(I.getSuccessor(0), printBasicBlockCustomArgs(false, false, true));
     // Extract if.cont_block from metadata
     BasicBlock *JoinBB = nullptr;
     if (MDNode *MD = I.getMetadata("if.cont_block")) {
@@ -4561,7 +4629,8 @@ void CWriter::visitBranchInstIfImpl(BranchInst &I) {
 
     if (!JoinBB) {
       llvm::errs()
-          << "Error: No if.cont_block metadata found for branch instruction.\n";
+          << "Error: No if.cont_block metadata found for branch instruction: "<< I.getName()
+          <<"\n";
       return;
     }
 
@@ -4581,10 +4650,7 @@ void CWriter::visitBranchInstIfImpl(BranchInst &I) {
         visitBranchInstIfImpl(*ElseBr);
       } else {
         Out << "  } else {\n";
-        printBasicBlock(ElseBB, printBasicBlockCustomArgs(false, true));
-        if (BranchInst *Br = dyn_cast<BranchInst>(ElseBB->getTerminator())) {
-          visitBranchInst(*Br);
-        }
+        printBasicBlock(ElseBB, printBasicBlockCustomArgs(false, false, true));
         Out << "  }\n";
       }
     } else {
@@ -4614,10 +4680,26 @@ void CWriter::visitBranchInstForImpl(BranchInst &I) {
   Out << "for (;";
 
   BranchInst *CondBr = dyn_cast<BranchInst>(I.getSuccessor(0)->getTerminator());
-
+  std::string OverwriteCond = "";
+  BasicBlock* ContBlock;
+  
+  llvm::errs() << "[visitBranchInstForImpl]: ";
   if (MDNode *MD = I.getMetadata("for.cond")) {
+    llvm::errs() << "for.cond ";
     hasCondBlock = true;
-    printBasicBlock(I.getSuccessor(0), printBasicBlockCustomArgs(false, true));
+    if (MDNode *MD = CondBr->getMetadata("contblock_shortcircuit")) {
+      llvm::errs() << "shortcircuit \n";
+      if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
+        ContBlock = SearchBasicBlockByLabel(I, MDS->getString().str());
+        if (auto *BI = dyn_cast<BranchInst>(ContBlock->getTerminator())) {
+          CondBr = BI;
+        }
+        InlinedBlocks.insert(ContBlock);
+        InlinedBlocks.insert(I.getSuccessor(0));
+      }
+    } else {
+      printBasicBlock(I.getSuccessor(0), printBasicBlockCustomArgs(false, true));
+    }
     writeOperand(CondBr->getCondition(), ContextCasted,
                  writeOperandCustomArgs(false));
   }
@@ -4626,21 +4708,15 @@ void CWriter::visitBranchInstForImpl(BranchInst &I) {
 
   BasicBlock *IncBlock = nullptr;
   if (MDNode *MD = I.getMetadata("for.inc")) {
+    llvm::errs() << " for.inc \n";
     // fetch the inc block based on label name in MD
     if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
-      std::string MDStr = MDS->getString().str();
-      // search for BB with name MDStr
-      for (auto &BB : *I.getParent()->getParent()) {
-        if (BB.getName() == MDStr) {
-          IncBlock = &BB;
-          break;
-        }
-      }
+      IncBlock = SearchBasicBlockByLabel(I, MDS->getString().str());
     }
   }
 
   if (IncBlock) {
-    printBasicBlock(IncBlock, printBasicBlockCustomArgs(true, true));
+    printBasicBlock(IncBlock, printBasicBlockCustomArgs(true, true, true));
   }
 
   Out << ") {\n";
@@ -4669,7 +4745,9 @@ void CWriter::visitBranchInstForImpl(BranchInst &I) {
 
   Out << "}\n";
   printBasicBlock(EndBlock, printBasicBlockCustomArgs(false, false, true));
+  llvm::errs() << "[visitBranchInstForImpl] Ending\n";
 }
+
 void CWriter::visitBranchInstWhileImpl(BranchInst &I) {
 
   // UC -> while.cond -> while.body UC -> while.cond ....
@@ -4684,14 +4762,27 @@ void CWriter::visitBranchInstWhileImpl(BranchInst &I) {
   // continued
 
   // 1. simply visit br while.cond and do nothing.
-  printBasicBlock(I.getSuccessor(0), printBasicBlockCustomArgs(false, true));
-
+  
   Out << "while";
-
+  llvm::errs() << "[visitBranchInstWhileImpl] ";
   // cast body's conditional br to a branch inst
   BranchInst *CondBr = dyn_cast<BranchInst>(I.getSuccessor(0)->getTerminator());
-  writeOperand(CondBr->getCondition(), ContextCasted);
-  Out << " {\n";
+   if (MDNode *MD = CondBr->getMetadata("contblock_shortcircuit")) {
+      llvm::errs() << "shortcircuit \n";
+      if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
+        BasicBlock* ContBlock = SearchBasicBlockByLabel(I, MDS->getString().str());
+        if (auto *BI = dyn_cast<BranchInst>(ContBlock->getTerminator())) {
+          CondBr = BI;
+        }
+        InlinedBlocks.insert(ContBlock);
+        InlinedBlocks.insert(I.getSuccessor(0));
+      }
+    } else {
+      printBasicBlock(I.getSuccessor(0), printBasicBlockCustomArgs(false, true));
+    }
+
+    writeOperand(CondBr->getCondition(), ContextCasted);
+    Out << " {\n";
 
   // this will recursively handle the body
   printBasicBlock(CondBr->getSuccessor(0),
@@ -4704,11 +4795,8 @@ void CWriter::visitBranchInstWhileImpl(BranchInst &I) {
 
 void CWriter::visitBranchInst(BranchInst &I) {
   CurInstr = &I;
+  llvm::errs() << "[visitBranchInst] called for " << I << "\n";
 
-  // check if "for.inc" in I.getSuccessor(0) name
-  if (I.getSuccessor(0)->getName().find("for.inc") != std::string::npos) {
-    return;
-  }
 
   if (MDNode *MD = I.getMetadata("for.start")) {
     visitBranchInstForImpl(I);
@@ -4717,11 +4805,6 @@ void CWriter::visitBranchInst(BranchInst &I) {
   // Check for "while.start" MD
   if (MDNode *MD = I.getMetadata("while.start")) {
     visitBranchInstWhileImpl(I);
-    return;
-  }
-
-  if (MDNode *MD = I.getMetadata("for.start")) {
-    visitBranchInstForImpl(I);
     return;
   }
 
@@ -4735,10 +4818,19 @@ void CWriter::visitBranchInst(BranchInst &I) {
     Out << "break;\n";
     return;
   }
-
+  
   // search `sw.epilog` string in I.getSuccessor(0)->getName()
   if (I.getSuccessor(0)->getName().find("sw.epilog") != std::string::npos) {
     // This is the end of a switch case
+    return;
+  }
+
+  if (MDNode *MD = I.getMetadata("contblock_shortcircuit")) {
+    // visitBranchInstIfMultipleCondImpl(I);
+    if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
+      BasicBlock* ContBlock = SearchBasicBlockByLabel(I, MDS->getString().str());
+      printBasicBlock(ContBlock, printBasicBlockCustomArgs(false, false, true));
+    }
     return;
   }
 
@@ -4887,7 +4979,7 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
     std::string FirstOperandName = "";
     std::string SecondOperandName = "";
 
-    extractOrigUses(I, FirstOperandName, SecondOperandName);
+    extractOrigUsesDouble(I, FirstOperandName, SecondOperandName);
     // Certain instructions require the operand to be forced to a specific type
     // so we use writeOperandWithCast here instead of writeOperand. Similarly
     // below for operand 1
@@ -4979,7 +5071,7 @@ void CWriter::visitICmpInst(ICmpInst &I) {
 
   std::string FirstOperandName = "";
   std::string SecondOperandName = "";
-  extractOrigUses(I, FirstOperandName, SecondOperandName);
+  extractOrigUsesDouble(I, FirstOperandName, SecondOperandName);
   struct writeOperandCustomArgs args = writeOperandCustomArgs();
   if (FirstOperandName != "")
     args.metadata = FirstOperandName;

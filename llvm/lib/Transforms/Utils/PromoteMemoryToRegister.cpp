@@ -793,7 +793,8 @@ static void emitAllocaMetadata(const std::vector<AllocaInst *> &Allocas) {
           size_t secondColon = s.find(':', firstColon + 1);
           if (firstColon != std::string::npos &&
               secondColon != std::string::npos) {
-            std::string varName = trimString(s.substr(0, firstColon));
+            // std::string varName = trimString(s.substr(0, firstColon));
+            std::string varName = AI->getName().str();
             std::string type = trimString(
                 s.substr(firstColon + 1, secondColon - firstColon - 1));
             SmallVector<Metadata *, 4> MFields;

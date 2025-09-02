@@ -4983,6 +4983,7 @@ Value *ScalarExprEmitter::VisitBinAssign(const BinaryOperator *E) {
 }
 
 Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
+
   // Perform vector logical and on comparisons with zero vectors.
   if (E->getType()->isVectorType()) {
     CGF.incrementProfileCounter(E);
@@ -5062,15 +5063,30 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
 
   CodeGenFunction::ConditionalEvaluation eval(CGF);
 
+  llvm::BasicBlock *LHSBlock = Builder.GetInsertBlock();
+
   // Branch on the LHS first.  If it is false, go to the failure (cont) block.
   CGF.EmitBranchOnBoolExpr(E->getLHS(), RHSBlock, ContBlock,
                            CGF.getProfileCount(E->getRHS()));
+  
 
   // Any edges into the ContBlock are now from an (indeterminate number of)
   // edges from this first condition.  All of these values will be false.  Start
   // setting up the PHI node in the Cont Block for this.
   llvm::PHINode *PN =
       llvm::PHINode::Create(llvm::Type::getInt1Ty(VMContext), 2, "", ContBlock);
+
+  std::string exprStr;
+  llvm::raw_string_ostream os(exprStr);
+  llvm::LLVMContext &Ctx = PN->getContext();
+
+  E->printPretty(os, nullptr, PrintingPolicy(CGF.getLangOpts()));
+  os.flush();
+  
+  llvm::MDNode *MDInst = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, exprStr));
+  PN->setMetadata("multiple_conds", MDInst);
+
+
   for (llvm::pred_iterator PI = pred_begin(ContBlock), PE = pred_end(ContBlock);
        PI != PE; ++PI)
     PN->addIncoming(llvm::ConstantInt::getFalse(VMContext), *PI);
@@ -5118,11 +5134,22 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
     PN->setDebugLoc(Builder.getCurrentDebugLocation());
   }
 
+    // attach ContBlock->getName() to the first branch's metadata
+  if (llvm::Instruction *TI = LHSBlock->getTerminator()) {
+    llvm::LLVMContext &Ctx = TI->getContext();
+    llvm::MDNode *MDContBlock =
+    llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ContBlock->getName()));
+    TI->setMetadata("contblock_shortcircuit", MDContBlock);
+    llvm::errs() <<"[visitBinLand:] Attaching " << ContBlock->getName() <<"\n";
+  }
+
   // ZExt result to int.
   return Builder.CreateZExtOrBitCast(PN, ResTy, "land.ext");
 }
 
 Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
+  
+
   // Perform vector logical or on comparisons with zero vectors.
   if (E->getType()->isVectorType()) {
     CGF.incrementProfileCounter(E);
@@ -5202,6 +5229,8 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
 
   CodeGenFunction::ConditionalEvaluation eval(CGF);
 
+  llvm::BasicBlock* LHSBlock = Builder.GetInsertBlock();
+  llvm::errs() << "[visitBinLor:] LHS is " << LHSBlock->getName() << "\n";
   // Branch on the LHS first.  If it is true, go to the success (cont) block.
   CGF.EmitBranchOnBoolExpr(E->getLHS(), ContBlock, RHSBlock,
                            CGF.getCurrentProfileCount() -
@@ -5212,7 +5241,19 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
   // setting up the PHI node in the Cont Block for this.
   llvm::PHINode *PN =
       llvm::PHINode::Create(llvm::Type::getInt1Ty(VMContext), 2, "", ContBlock);
-  for (llvm::pred_iterator PI = pred_begin(ContBlock), PE = pred_end(ContBlock);
+  
+  std::string exprStr;
+  llvm::raw_string_ostream os(exprStr);
+  llvm::LLVMContext &Ctx = PN->getContext();
+
+  E->printPretty(os, nullptr, PrintingPolicy(CGF.getLangOpts()));
+  os.flush();
+  
+  llvm::MDNode *MDInst = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, exprStr));
+  PN->setMetadata("multiple_conds", MDInst);
+
+  
+      for (llvm::pred_iterator PI = pred_begin(ContBlock), PE = pred_end(ContBlock);
        PI != PE; ++PI)
     PN->addIncoming(llvm::ConstantInt::getTrue(VMContext), *PI);
 
@@ -5251,6 +5292,14 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
   // If the top of the logical operator nest, update the MCDC bitmap.
   if (CGF.MCDCLogOpStack.empty())
     CGF.maybeUpdateMCDCTestVectorBitmap(E);
+
+  if (llvm::Instruction *TI = LHSBlock->getTerminator()) {
+    llvm::LLVMContext &Ctx = TI->getContext();
+    llvm::MDNode *MDContBlock =
+    llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ContBlock->getName()));
+    TI->setMetadata("contblock_shortcircuit", MDContBlock);
+    llvm::errs() <<"[visitBinLor:] Attaching " << ContBlock->getName() <<"\n";
+  }
 
   // ZExt result to int.
   return Builder.CreateZExtOrBitCast(PN, ResTy, "lor.ext");
