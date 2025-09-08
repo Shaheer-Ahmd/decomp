@@ -629,32 +629,86 @@ CWriter::printTypeName(raw_ostream &Out, Type *Ty, bool isSigned,
   }
 }
 
-raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out,
-                                             StructType *STy) {
+static std::string trim(const std::string &str) {
+  size_t first = str.find_first_not_of(" \t");
+  if (first == std::string::npos) return "";
+  size_t last = str.find_last_not_of(" \t");
+  return str.substr(first, (last - first + 1));
+}
+
+raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out, StructType *STy, const Module &M) {
+  if (STy->isLiteral() || STy->isOpaque())
+    return Out;
+
+  std::string StructName;
+  if (STy->hasName()) {
+    StructName = STy->getName().str();
+  } else {
+    StructName = getStructName(STy);
+  }
+
   if (STy->isPacked())
     Out << "#ifdef _MSC_VER\n#pragma pack(push, 1)\n#endif\n";
-  Out << getStructName(STy) << " {\n";
+
+  std::string CDeclName = StructName;
+  if (CDeclName.rfind("struct.", 0) == 0)
+    CDeclName = CDeclName.substr(strlen("struct."));
+
+  Out << "struct " << CDeclName << " {\n";
+
   unsigned Idx = 0;
-  for (StructType::element_iterator I = STy->element_begin(),
-                                    E = STy->element_end();
-       I != E; ++I, Idx++) {
-    Out << "  ";
+  auto *FieldsMD = M.getNamedMetadata(StructName + ".fields");
+
+  for (StructType::element_iterator I = STy->element_begin(), E = STy->element_end(); I != E; ++I, ++Idx) {
     bool empty = isEmptyType(*I);
-    if (empty)
-      Out << "/* "; // skip zero-sized types
-    // std::cout << "Calling printTypeName in printStructDeclaration\n";
-    printTypeName(Out, *I, false) << " field" << utostr(Idx);
-    if (empty)
-      Out << " */"; // skip zero-sized types
-    else
+    if (empty) Out << "  /* ";
+
+    std::string FieldName = "field" + utostr(Idx);
+    std::string FieldType;
+    bool foundMetadata = false;
+
+    if (FieldsMD && Idx < FieldsMD->getNumOperands()) {
+      if (MDNode *FieldMD = dyn_cast<MDNode>(FieldsMD->getOperand(Idx))) {
+        if (FieldMD->getNumOperands() > 0) {
+          if (MDString *MDS = dyn_cast<MDString>(FieldMD->getOperand(0))) {
+            std::string metadataStr = MDS->getString().str();
+            std::istringstream iss(metadataStr);
+            std::getline(iss, FieldName, ':');
+            std::getline(iss, FieldType, ':');
+            FieldName = trim(FieldName);
+            FieldType = trim(FieldType);
+            foundMetadata = true;
+
+            // Handle array types like "char[50]"
+            std::smatch match;
+            std::regex arrayRegex(R"((\w+)\[(\d+)\])");
+            if (std::regex_match(FieldType, match, arrayRegex)) {
+              std::string baseType = match[1];
+              std::string arraySize = match[2];
+              Out << "  " << baseType << " " << FieldName << "[" << arraySize << "];\n";
+            } else {
+              Out << "  " << FieldType << " " << FieldName << ";\n";
+            }
+
+            continue; // Skip fallback logic since we handled the field
+          }
+        }
+      }
+    }
+
+    if (!foundMetadata) {
+      Out << "  ";
+      printTypeName(Out, *I, false) << " " << FieldName;
+      if (empty) Out << " */";
       Out << ";\n";
+    }
   }
-  Out << '}';
-  if (STy->isPacked())
-    Out << " __attribute__ ((packed))";
-  Out << ";\n";
+
+  Out << "};\n";
+
   if (STy->isPacked())
     Out << "#ifdef _MSC_VER\n#pragma pack(pop)\n#endif\n";
+
   return Out;
 }
 
@@ -3899,6 +3953,14 @@ void CWriter::printModuleTypes(raw_ostream &Out) {
        it != end; ++it) {
     printContainedTypes(Out, *it, TypesPrinted);
   }
+
+  for (StructType *ST : TheModule->getIdentifiedStructTypes()) {
+    ST->print(llvm::errs()); llvm::errs() << "\n";
+
+    if (!TypesPrinted.count(ST)) {
+      printContainedTypes(Out, ST, TypesPrinted);
+    }
+  }
 }
 
 void CWriter::forwardDeclareStructs(raw_ostream &Out, Type *Ty,
@@ -3945,7 +4007,7 @@ void CWriter::printContainedTypes(raw_ostream &Out, Type *Ty,
 
   if (StructType *ST = dyn_cast<StructType>(Ty)) {
     // Print structure type out.
-    printStructDeclaration(Out, ST);
+    printStructDeclaration(Out, ST, *TheModule);
   } else if (ArrayType *AT = dyn_cast<ArrayType>(Ty)) {
     // Print array type out.
     printArrayDeclaration(Out, AT);

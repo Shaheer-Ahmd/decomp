@@ -208,7 +208,7 @@ private:
   raw_ostream &printFunctionDeclaration(raw_ostream &Out,
                                         FunctionInfoVariant FIV,
                                         const std::string_view Name);
-  raw_ostream &printStructDeclaration(raw_ostream &Out, StructType *Ty);
+  raw_ostream &printStructDeclaration(raw_ostream &Out, StructType *STy, const Module &M);
   raw_ostream &printArrayDeclaration(raw_ostream &Out, ArrayType *Ty);
   raw_ostream &printVectorDeclaration(raw_ostream &Out, VectorType *Ty);
 

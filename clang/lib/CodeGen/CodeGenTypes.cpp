@@ -827,8 +827,33 @@ llvm::StructType *CodeGenTypes::ConvertRecordDeclType(const RecordDecl *RD) {
   if (SkippedLayout)
     TypeCache.clear();
 
+  // === CUSTOM METADATA ATTACHMENT START ===
+  if (RD->isStruct()) {
+    llvm::LLVMContext &Ctx = CGM.getLLVMContext();
+    llvm::Module &Mod = CGM.getModule();
+
+    std::string StructName = RD->getNameAsString();
+    if (!StructName.empty()) {
+      llvm::NamedMDNode *StructMD = Mod.getOrInsertNamedMetadata("struct." + StructName + ".fields");
+
+      unsigned SSAIndex = 0;
+      for (const auto *Field : RD->fields()) {
+        std::string FieldName = Field->getNameAsString();
+        std::string FieldTypeStr = Field->getType().getAsString();
+
+        std::string MetadataString = FieldName + " : " + FieldTypeStr;
+
+        llvm::Metadata *FieldMDStr = llvm::MDString::get(Ctx, MetadataString);
+        llvm::MDNode *FieldNode = llvm::MDNode::get(Ctx, FieldMDStr);
+        StructMD->addOperand(FieldNode);
+      }
+    }
+  }
+  // === CUSTOM METADATA ATTACHMENT END ===
+
   return Ty;
 }
+
 
 /// getCGRecordLayout - Return record layout info for the given record decl.
 const CGRecordLayout &
