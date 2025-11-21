@@ -33,6 +33,7 @@
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/MDBuilder.h"
+#include "llvm/MetadataKeys/MetadataKeys.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include <optional>
 
@@ -821,7 +822,70 @@ void CodeGenFunction::EmitIndirectGotoStmt(const IndirectGotoStmt &S) {
   EmitBranch(IndGotoBB);
 }
 
+void CodeGenFunction::addSuccessorMetadata(
+    llvm::Instruction *Inst, llvm::ArrayRef<llvm::BasicBlock *> Successors) {
+  if (!Inst || Successors.empty())
+    return;
+
+  llvm::LLVMContext &Ctx = getLLVMContext();
+  llvm::SmallVector<llvm::Metadata *, 8> MDArgs;
+
+  // Convert each BasicBlock name to an MDString
+  for (llvm::BasicBlock *BB : Successors) {
+    if (BB) {
+      MDArgs.push_back(llvm::MDString::get(Ctx, BB->getName()));
+    } else {
+      // Handle null blocks (e.g. one-sided if) with a placeholder or empty
+      // string
+      MDArgs.push_back(llvm::MDString::get(Ctx, "null"));
+    }
+  }
+
+  // Create a single tuple node containing all names
+  llvm::MDNode *Node = llvm::MDNode::getDistinct(Ctx, MDArgs);
+
+  // Attach to the instruction with a single generic ID
+  Inst->setMetadata(llvm::mdk::CompoundConditionSuccessorsKey, Node);
+}
+
+void CodeGenFunction::addSuccessorMetadata(
+    llvm::Instruction *Inst,
+    llvm::ArrayRef<llvm::BasicBlock *> Successors,
+    llvm::ArrayRef<llvm::ConstantInt *> CaseValues) {
+  if (!Inst || Successors.empty())
+    return;
+
+  // First: keep old behaviour (BB names).
+  addSuccessorMetadata(Inst, Successors);
+
+  // If no case values provided, nothing more to do.
+  if (CaseValues.empty())
+    return;
+
+  assert(Successors.size() == CaseValues.size() &&
+         "Successor and case-value arrays must have the same size");
+
+  llvm::LLVMContext &Ctx = getLLVMContext();
+  llvm::SmallVector<llvm::Metadata *, 8> MDArgs;
+
+  // Encode each case value as metadata. Use ConstantAsMetadata for real cases
+  // and a marker string for default/null.
+  for (llvm::ConstantInt *CI : CaseValues) {
+    if (CI) {
+      MDArgs.push_back(llvm::ConstantAsMetadata::get(CI));
+    } else {
+      // e.g. default edge or missing value
+      MDArgs.push_back(llvm::MDString::get(Ctx, "default"));
+    }
+  }
+
+  // Use a separate metadata key for case values so old consumers don't break.
+  llvm::MDNode *Node = llvm::MDNode::getDistinct(Ctx, MDArgs);
+  Inst->setMetadata(llvm::mdk::CompoundConditionCaseValuesKey, Node);
+}
+
 void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
+  llvm::errs() << "[EmitIfStmt] Called \n";
   // The else branch of a consteval if statement is always the only branch that
   // can be runtime evaluated.
   if (S.isConsteval()) {
@@ -892,6 +956,10 @@ void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
       CGM.getCodeGenOpts().OptimizationLevel)
     LH = Stmt::getLikelihood(S.getThen(), S.getElse());
 
+  llvm::BranchInst *FirstSCBranch = nullptr;
+  llvm::SaveAndRestore<llvm::BranchInst **> Scope(FirstShortCircuitBranchSlot,
+                                                  &FirstSCBranch);
+
   // When measuring MC/DC, always fully evaluate the condition up front using
   // EvaluateExprAsBool() so that the test vector bitmap can be updated prior to
   // executing the body of the if.then or if.else. This is useful for when
@@ -955,14 +1023,26 @@ void CodeGenFunction::EmitIfStmt(const IfStmt &S) {
 
   // Emit the continuation block for code after the if.
   EmitBlock(ContBlock, true);
-  llvm::errs() << "Then " << ThenBlock->getName() << " Else "
+  llvm::errs() << "[EmitIfStmt] Then " << ThenBlock->getName() << " Else "
                << ElseBlock->getName()
                << " merge at block: " << ContBlock->getName() << "\n";
   llvm::LLVMContext &Ctx = CGM.getLLVMContext();
   llvm::MDString *MDStr = llvm::MDString::get(Ctx, ContBlock->getName());
   llvm::MDNode *MD = llvm::MDNode::get(Ctx, MDStr);
-  BIForMetadata->setMetadata("if.cont_block", MD);
-
+  BIForMetadata->setMetadata(llvm::mdk::ContBlockKey, MD);
+  BIForMetadata->setMetadata(
+      llvm::mdk::IfTag, llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, "")));
+  if (FirstSCBranch) {
+    llvm::errs() << "[EmitIfStmt] attaching md to firstScBranch \n";
+    // Attach any IfStmt-specific metadata here.
+    addSuccessorMetadata(FirstSCBranch, {ThenBlock, ElseBlock});
+    FirstSCBranch->setMetadata(
+        llvm::mdk::ContBlockKey,
+        llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ContBlock->getName())));
+    FirstSCBranch->setMetadata(
+        llvm::mdk::CompoundConditionIfTagKey,
+        llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, "")));
+  }
   // When single byte coverage mode is enabled, add a counter to continuation
   // block.
   if (llvm::EnableSingleByteCoverage)
@@ -1044,14 +1124,10 @@ void CodeGenFunction::EmitWhileStmt(const WhileStmt &S,
   llvm::BasicBlock *BBEmitBlock = LoopHeader.getBlock();
   // == EmitBranch(BB);
   llvm::BasicBlock *TargetEmitBranch = BBEmitBlock;
+  llvm::BranchInst *BIForMetadata;
   if (!CurBBEmitBlock || CurBBEmitBlock->getTerminator()) {
   } else {
-    llvm::BranchInst *BI = Builder.CreateBr(TargetEmitBranch);
-    if (BI) {
-      llvm::LLVMContext &Ctx = CGM.getLLVMContext();
-      llvm::MDNode *MD = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ""));
-      BI->setMetadata("while.start", MD);
-    }
+    BIForMetadata = Builder.CreateBr(TargetEmitBranch);
   }
   Builder.ClearInsertionPoint();
   // ===
@@ -1163,6 +1239,27 @@ void CodeGenFunction::EmitWhileStmt(const WhileStmt &S,
   if (!EmitBoolCondBranch)
     SimplifyForwardingBlocks(LoopHeader.getBlock());
 
+  if (BIForMetadata) {
+    BIForMetadata->setMetadata(
+        llvm::mdk::WhileTag,
+        llvm::MDNode::get(CGM.getLLVMContext(),
+                          llvm::MDString::get(CGM.getLLVMContext(), "")));
+    BIForMetadata->setMetadata(
+        llvm::mdk::BodyBlockKey,
+        llvm::MDNode::get(
+            CGM.getLLVMContext(),
+            llvm::MDString::get(CGM.getLLVMContext(), LoopBody->getName())));
+    BIForMetadata->setMetadata(
+        llvm::mdk::ContBlockKey,
+        llvm::MDNode::get(CGM.getLLVMContext(),
+                          llvm::MDString::get(CGM.getLLVMContext(),
+                                              LoopExit.getBlock()->getName())));
+    BIForMetadata->setMetadata(
+        llvm::mdk::ConditionBlockKey,
+        llvm::MDNode::get(
+            CGM.getLLVMContext(),
+            llvm::MDString::get(CGM.getLLVMContext(), BBEmitBlock->getName())));
+  }
   // When single byte coverage mode is enabled, add a counter to continuation
   // block.
   if (llvm::EnableSingleByteCoverage)
@@ -1317,8 +1414,9 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
 
   if (S.getCond()) {
     llvm::LLVMContext &Ctx = CGM.getLLVMContext();
-    llvm::MDNode *MD = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ""));
-    BIForMetadata->setMetadata("for.cond", MD);
+    llvm::MDNode *MD =
+        llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, CondBlock->getName()));
+    BIForMetadata->setMetadata(llvm::mdk::ConditionBlockKey, MD);
     // If the for statement has a condition scope, emit the local variable
     // declaration.
     if (S.getConditionVariable()) {
@@ -1361,9 +1459,18 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
     }
 
     EmitBlock(ForBody);
+    BIForMetadata->setMetadata(
+        llvm::mdk::BodyBlockKey,
+        llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ForBody->getName())));
+
   } else {
     // Treat it as a non-zero constant.  Don't even create a new block for the
     // body, just fall into it.
+    BIForMetadata->setMetadata(
+        llvm::mdk::BodyBlockKey,
+        llvm::MDNode::get(
+            CGM.getLLVMContext(),
+            llvm::MDString::get(CGM.getLLVMContext(), CondBlock->getName())));
   }
 
   // When single byte coverage mode is enabled, add a counter to the body.
@@ -1378,18 +1485,16 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
     EmitStmt(S.getBody());
   }
 
-  
-
   // If there is an increment, emit it next.
   if (S.getInc()) {
     EmitBlock(Continue.getBlock());
     EmitStmt(S.getInc());
     if (llvm::EnableSingleByteCoverage)
-    incrementProfileCounter(S.getInc());
+      incrementProfileCounter(S.getInc());
     llvm::LLVMContext &Ctx = CGM.getLLVMContext();
     llvm::MDNode *MD = llvm::MDNode::get(
         Ctx, llvm::MDString::get(Ctx, Continue.getBlock()->getName()));
-    BIForMetadata->setMetadata("for.inc", MD);
+    BIForMetadata->setMetadata(llvm::mdk::IncBlockKey, MD);
   }
 
   BreakContinueStack.pop_back();
@@ -1403,18 +1508,21 @@ void CodeGenFunction::EmitForStmt(const ForStmt &S,
 
   LoopStack.pop();
 
-  
   // Emit the fall-through block.
   EmitBlock(LoopExit.getBlock(), true);
-  
+
   // ===== add metadata =======
   if (BIForMetadata) {
     llvm::LLVMContext &Ctx = CGM.getLLVMContext();
-    llvm::MDNode *MD = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, LoopExit.getBlock()->getName()));
-    BIForMetadata->setMetadata("for.start", MD);
+    llvm::MDNode *MD = llvm::MDNode::get(
+        Ctx, llvm::MDString::get(Ctx, LoopExit.getBlock()->getName()));
+    BIForMetadata->setMetadata(llvm::mdk::ContBlockKey, MD);
+    BIForMetadata->setMetadata(
+        llvm::mdk::ForTag,
+        llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, "ForTag")));
   }
   // ==========================
-  
+
   // When single byte coverage mode is enabled, add a counter to continuation
   // block.
   if (llvm::EnableSingleByteCoverage)
@@ -1596,6 +1704,10 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
   // Emit the result value, even if unused, to evaluate the side effects.
   const Expr *RV = S.getRetValue();
 
+  llvm::BranchInst *FirstSCBranch = nullptr;
+  llvm::SaveAndRestore<llvm::BranchInst **> Scope(FirstShortCircuitBranchSlot,
+                                                  &FirstSCBranch);
+
   // Record the result expression of the return statement. The recorded
   // expression is used to determine whether a block capture's lifetime should
   // end at the end of the full expression as opposed to the end of the scope
@@ -1684,6 +1796,13 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
 
   cleanupScope.ForceCleanup();
   EmitBranchThroughCleanup(ReturnBlock);
+
+  if (FirstSCBranch) {
+    FirstSCBranch->setMetadata(
+        llvm::mdk::CompoundConditionReturnTagKey,
+        llvm::MDNode::get(getLLVMContext(),
+                          llvm::MDString::get(getLLVMContext(), "")));
+  }
 }
 
 void CodeGenFunction::EmitDeclStmt(const DeclStmt &S) {
@@ -1718,7 +1837,7 @@ void CodeGenFunction::EmitBreakStmt(const BreakStmt &S) {
   llvm::LLVMContext &Ctx = BI->getContext();
   llvm::MDNode *MD = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ""));
 
-  BI->setMetadata("while.break", MD);
+  BI->setMetadata(llvm::mdk::LoopBreakKey, MD);
 
   EmitBranchThroughCleanupImpl(Dest, BI);
 }
@@ -2301,6 +2420,10 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
 
   RunCleanupsScope ConditionScope(*this);
 
+  llvm::BranchInst *FirstSCBranch = nullptr;
+  llvm::SaveAndRestore<llvm::BranchInst **> Scope(FirstShortCircuitBranchSlot,
+                                                  &FirstSCBranch);
+
   if (S.getInit())
     EmitStmt(S.getInit());
 
@@ -2356,7 +2479,7 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   // Update the default block in case explicit case range tests have
   // been chained on top.
   SwitchInsn->setDefaultDest(CaseRangeBlock);
-
+  bool DefaultNotNeeded = false;
   // If a default was never emitted:
   if (!DefaultBlock->getParent()) {
     // If we have cleanups, emit the default block so that there's a
@@ -2366,6 +2489,7 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
 
       // Otherwise, just forward the default block to the switch end.
     } else {
+      DefaultNotNeeded = true;
       DefaultBlock->replaceAllUsesWith(SwitchExit.getBlock());
       delete DefaultBlock;
     }
@@ -2377,17 +2501,56 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   EmitBlock(SwitchExit.getBlock(), true);
   incrementProfileCounter(&S);
 
-  //add SwitchExit's label name to MD of SwitchInsn
-  llvm::Instruction* SwitchInsnForMetadata = dyn_cast<llvm::Instruction>(SwitchInsn);
-  llvm::MDNode *SwitchExitMD =
+  // add SwitchExit's label name to MD of SwitchInsn
+  llvm::Instruction *SwitchInsnForMetadata =
+      dyn_cast<llvm::Instruction>(SwitchInsn);
+  llvm::MDNode *SwitchExitMD = llvm::MDNode::get(
+      getLLVMContext(),
+      llvm::MDString::get(getLLVMContext(), SwitchExit.getBlock()->getName()));
+      if (SwitchInsnForMetadata) {
+    SwitchInsnForMetadata->setMetadata(llvm::mdk::ContBlockKey, SwitchExitMD);
+    llvm::LLVMContext &Ctx = getLLVMContext();
+    llvm::MDNode *DefaultBBMD = llvm::MDNode::get(
+        Ctx, llvm::MDString::get(Ctx, DefaultBlock->getName()));
+    llvm::errs() << "[SwitchExit.getBlock() != DefaultBlock] "
+                 << (SwitchExit.getBlock() != DefaultBlock) << "\n";
+         if (!DefaultNotNeeded) {
+      SwitchInsnForMetadata->setMetadata(llvm::mdk::DefaultSuccKey,
+                                         DefaultBBMD);
+    }
+    SwitchInsnForMetadata->setMetadata(
+      llvm::mdk::SwitchTag,
       llvm::MDNode::get(getLLVMContext(),
-                        llvm::MDString::get(getLLVMContext(), SwitchExit.getBlock()->getName()));
-  if (SwitchInsnForMetadata) {
-    SwitchInsnForMetadata->setMetadata("sw.exit", SwitchExitMD);
-  }
-  
-
-  // If the switch has a condition wrapped by __builtin_unpredictable,
+      llvm::MDString::get(getLLVMContext(), "")));
+      if (FirstSCBranch) {
+        FirstSCBranch->setMetadata(
+          llvm::mdk::CompoundConditionSwitchTagKey,
+          llvm::MDNode::get(getLLVMContext(),
+          llvm::MDString::get(getLLVMContext(), "")));
+          FirstSCBranch->setMetadata(llvm::mdk::ContBlockKey, SwitchExitMD);
+          llvm::SmallVector<llvm::BasicBlock *, 8> SuccVec;
+          llvm::SmallVector<llvm::ConstantInt *, 8> CaseValVec;
+          
+          for (auto &Case : SwitchInsn->cases()) {
+            llvm::BasicBlock *SuccBB = Case.getCaseSuccessor();
+            llvm::ConstantInt *CaseVal = Case.getCaseValue();
+            
+            SuccVec.push_back(SuccBB);
+            CaseValVec.push_back(CaseVal);
+          }
+          
+          llvm::ArrayRef<llvm::BasicBlock *> Successors(SuccVec);
+          llvm::ArrayRef<llvm::ConstantInt *> CaseValues(CaseValVec);
+          
+          addSuccessorMetadata(FirstSCBranch, Successors, CaseValues);
+          if (!DefaultNotNeeded) {
+            FirstSCBranch->setMetadata(llvm::mdk::DefaultSuccKey,
+                                               DefaultBBMD);
+          }
+        }
+      }
+      
+      // If the switch has a condition wrapped by __builtin_unpredictable,
   // create metadata that specifies that the switch is unpredictable.
   // Don't bother if not optimizing because that metadata would not be used.
   auto *Call = dyn_cast<CallExpr>(S.getCond());

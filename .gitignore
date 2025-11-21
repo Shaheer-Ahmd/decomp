@@ -24,6 +24,11 @@
 !llvm/projects/llvm-cbe/lib/Target/CBackend/CBackend.cpp
 !llvm/projects/llvm-cbe/lib/Target/CBackend/CBackend.h
 
+!llvm/include/
+!llvm/include/llvm/
+!llvm/include/llvm/MetadataKeys/
+!llvm/include/llvm/MetadataKeys/*
+
 !llvm/lib/
 !llvm/lib/Transforms/
 !llvm/lib/Transforms/Utils/

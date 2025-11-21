@@ -41,6 +41,7 @@
 #include <variant>
 
 #include "IDMap.h"
+#include "llvm/ADT/StringMap.h"
 
 namespace llvm_cbe {
 
@@ -53,9 +54,165 @@ public:
 
 using FunctionInfoVariant = std::variant<const Function *, const CallInst *>;
 
+struct ConditionSource {
+  llvm::Value *IRValue = nullptr; // if non-null: print via writeOperand
+  llvm::MDNode *OverwriteCCTree = nullptr; // if non-empty: print this directly
+  llvm::Instruction *OverwriteCCTreeInstruction = nullptr; 
+};
+
+/// Normalized shape for an `if` statement.
+struct IfShape {
+  ConditionSource Cond;
+  llvm::BasicBlock *ThenBB = nullptr;
+  llvm::BasicBlock *ElseBB = nullptr; // may be null (no else)
+  llvm::BasicBlock *JoinBB = nullptr; // merge block (if.cont_block)
+  bool IsElseIf = false;              // true if ElseBB starts another `if`
+};
+
+struct ForShape {
+  ConditionSource Cond; // condition in `for (;; Cond; ...)`
+
+  llvm::BasicBlock *CondBB =
+      nullptr; // block that computes the condition (may be null)
+  llvm::BasicBlock *BodyBB = nullptr; // loop body entry
+  llvm::BasicBlock *IncBB = nullptr;  // increment block (may be null)
+  llvm::BasicBlock *ExitBB = nullptr; // block after the loop
+};
+
+struct WhileShape {
+  ConditionSource Cond;
+
+  llvm::BasicBlock *CondBB =
+      nullptr; // block that computes the condition (may be null)
+  llvm::BasicBlock *BodyBB = nullptr; // loop body entry
+  llvm::BasicBlock *ExitBB = nullptr; // block after the loop
+};
+
+struct SwitchShape {
+  ConditionSource Cond;
+  llvm::SmallVector<std::pair<llvm::ConstantInt *, llvm::BasicBlock *>, 8>
+      Cases;
+  llvm::BasicBlock *DefaultBB = nullptr;
+  llvm::BasicBlock *ExitBB = nullptr; // block after the switch
+};
+
+struct ReturnShape {
+  ConditionSource Cond;
+};
+
+enum class NormalizedBranchKind {
+  If,
+  For,
+  While,
+  LoopBreak,
+  UserIntroducedGoto,
+  CCSwitch,
+  CCReturn,
+  Unknown, // placeholder for everything we don't handle yet
+};
+
+struct NormalizedBranch {
+  NormalizedBranchKind Kind = NormalizedBranchKind::Unknown;
+  IfShape IfInfo;
+  ForShape ForInfo;
+  WhileShape WhileInfo;
+  SwitchShape CCSwitchInfo;
+  ReturnShape CCReturnInfo;
+
+  void printDetails() {
+    switch (Kind) {
+    case NormalizedBranchKind::If:
+      llvm::errs() << "NormalizedBranchKind::If\n";
+      llvm::errs() << "  ThenBB: "
+                   << (IfInfo.ThenBB ? IfInfo.ThenBB->getName() : "<null>")
+                   << "\n";
+      llvm::errs() << "  ElseBB: "
+                   << (IfInfo.ElseBB ? IfInfo.ElseBB->getName() : "<null>")
+                   << "\n";
+      llvm::errs() << "  JoinBB: "
+                   << (IfInfo.JoinBB ? IfInfo.JoinBB->getName() : "<null>")
+                   << "\n";
+      llvm::errs() << "  IsElseIf: " << (IfInfo.IsElseIf ? "true" : "false")
+                   << "\n";
+      break;
+    case NormalizedBranchKind::For:
+      llvm::errs() << "NormalizedBranchKind::For\n";
+      llvm::errs() << "  CondBB: "
+                   << (ForInfo.CondBB ? ForInfo.CondBB->getName() : "<null>")
+                   << "\n";
+      llvm::errs() << "  BodyBB: "
+                   << (ForInfo.BodyBB ? ForInfo.BodyBB->getName() : "<null>")
+                   << "\n";
+      llvm::errs() << "  IncBB: "
+                   << (ForInfo.IncBB ? ForInfo.IncBB->getName() : "<null>")
+                   << "\n";
+      llvm::errs() << "  ExitBB: "
+                   << (ForInfo.ExitBB ? ForInfo.ExitBB->getName() : "<null>")
+                   << "\n";
+      break;
+    case NormalizedBranchKind::While:
+      llvm::errs() << "NormalizedBranchKind::While\n";
+      llvm::errs() << "  CondBB: "
+                   << (WhileInfo.CondBB ? WhileInfo.CondBB->getName()
+                                        : "<null>")
+                   << "\n";
+      llvm::errs() << "  BodyBB: "
+                   << (WhileInfo.BodyBB ? WhileInfo.BodyBB->getName()
+                                        : "<null>")
+                   << "\n";
+      llvm::errs() << "  ExitBB: "
+                   << (WhileInfo.ExitBB ? WhileInfo.ExitBB->getName()
+                                        : "<null>")
+                   << "\n";
+      break;
+    case NormalizedBranchKind::LoopBreak:
+      llvm::errs() << "NormalizedBranchKind::LoopBreak\n";
+      break;
+    case NormalizedBranchKind::UserIntroducedGoto:
+      llvm::errs() << "NormalizedBranchKind::UserIntroducedGoto\n";
+      break;
+    case NormalizedBranchKind::CCSwitch:
+      llvm::errs() << "NormalizedBranchKind::CCSwitch\n";
+
+      llvm::errs() << "  DefaultBB: "
+                   << (CCSwitchInfo.DefaultBB
+                           ? CCSwitchInfo.DefaultBB->getName()
+                           : "<null>")
+                   << "\n";
+      llvm::errs() << "  ExitBB: "
+                   << (CCSwitchInfo.ExitBB ? CCSwitchInfo.ExitBB->getName()
+                                            : "<null>")
+                   << "\n";
+
+      llvm::errs() << "  Cases (" << CCSwitchInfo.Cases.size() << "):\n";
+      for (unsigned i = 0; i < CCSwitchInfo.Cases.size(); ++i) {
+        auto &Pair = CCSwitchInfo.Cases[i];
+        llvm::ConstantInt *CI = Pair.first;
+        llvm::BasicBlock *BB = Pair.second;
+
+        llvm::errs() << "    [" << i << "] value = ";
+        if (CI) {
+          // Print the integer value, signed for readability
+          CI->getValue().print(llvm::errs(), /*isSigned=*/true);
+        } else {
+          // nullptr can mean default or “no specific value”
+          llvm::errs() << "<default/null>";
+        }
+
+        llvm::errs() << ", BB = " << (BB ? BB->getName() : "<null>") << "\n";
+      }
+      break;
+    case NormalizedBranchKind::Unknown:
+      llvm::errs() << "NormalizedBranchKind::Unknown\n";
+      break;
+    }
+  }
+};
+
 /// CWriter - This class is the main chunk of code that converts an LLVM
 /// module to a C translation unit.
 class CWriter : public FunctionPass, public InstVisitor<CWriter> {
+  llvm::StringMap<llvm::BasicBlock *> BlockNameToBlockPtrMap;
   std::string _Out;
   std::string _OutHeaders;
   raw_string_ostream OutHeaders;
@@ -244,13 +401,35 @@ private:
     writeOperandCustomArgs(bool w = true, std::string m = "")
         : wrapInParens(w), metadata(std::move(m)) {}
   };
+  struct visitBranchInstCustomArgs {
+    std::string overwriteCondition;
+    visitBranchInstCustomArgs(std::string ow = "")
+        : overwriteCondition(std::move(ow)) {}
+  };
+
+  void emitCondition(const ConditionSource &C, llvm::Instruction* I = nullptr);
+  NormalizedBranch *normalizeIfBranch(llvm::BranchInst &I);
+  NormalizedBranch *normalizeBranch(llvm::BranchInst &I);
+  NormalizedBranch *normalizeForBranch(llvm::BranchInst &I);
+  NormalizedBranch *normalizeWhileBranch(llvm::BranchInst &I);
+  NormalizedBranch *normalizeCompoundConditionIfBranch(llvm::BranchInst &BI);
+  NormalizedBranch *normalizeCompoundConditionSwitchInst(
+      llvm::BranchInst &BI);
+  void emitIf(IfShape ifShape);
+  void emitFor(ForShape forShape);
+  void emitWhile(WhileShape whileShape);
+  void emitSwitch(SwitchShape switchShape);
+  void emitReturn(ReturnShape returnShape);
 
   void writeOperandDeref(Value *Operand);
+
   void
   writeOperand(Value *Operand, enum OperandContext Context = ContextNormal,
                writeOperandCustomArgs customArgs = writeOperandCustomArgs());
   void writeInstComputationInline(Instruction &I);
-  void writeOperandInternal(Value *Operand, enum OperandContext Context = ContextNormal, writeOperandCustomArgs customArgs = writeOperandCustomArgs());
+  void writeOperandInternal(
+      Value *Operand, enum OperandContext Context = ContextNormal,
+      writeOperandCustomArgs customArgs = writeOperandCustomArgs());
   void writeOperandWithCast(
       Value *Operand, unsigned Opcode,
       writeOperandCustomArgs customArgs = writeOperandCustomArgs());
@@ -315,10 +494,14 @@ private:
   friend class InstVisitor<CWriter>;
 
   void visitReturnInst(ReturnInst &I);
-  void visitBranchInst(BranchInst &I);
-  void visitBranchInstIfImpl(BranchInst &I);
-  void visitBranchInstWhileImpl(BranchInst &I);
-  void visitBranchInstForImpl(BranchInst &I);
+  void visitBranchInst(BranchInst &I, visitBranchInstCustomArgs customArgs =
+                                          visitBranchInstCustomArgs());
+  std::string blockNameToConditionString(llvm::Instruction *I,
+                                         StringRef BBName);
+                                         bool compoundHasExistingBlock(llvm::MDNode *Node,
+                                       llvm::Instruction *I);
+  bool emitCompoundConditionRecursive(llvm::MDNode *Node,
+                                             llvm::Instruction *I);
 
   void visitSwitchInst(SwitchInst &I);
   void visitIndirectBrInst(IndirectBrInst &I);

@@ -251,6 +251,9 @@ template <> struct DominatingValue<RValue> {
   }
 };
 
+
+class CodeGenFunction;
+
 /// CodeGenFunction - This class organizes the per-function state that is used
 /// while generating LLVM code.
 class CodeGenFunction : public CodeGenTypeCache {
@@ -258,7 +261,20 @@ class CodeGenFunction : public CodeGenTypeCache {
   void operator=(const CodeGenFunction &) = delete;
 
   friend class CGCXXABI;
+
+  /// When non-null, points to a slot where the first short-circuit branch
+  /// of the current boolean condition should be stored.
+  llvm::BranchInst **FirstShortCircuitBranchSlot = nullptr;
+
 public:
+  llvm::DenseMap<const Expr *, llvm::BasicBlock *> ExprToBBMap;
+
+  void rememberShortCircuitBranch(llvm::BranchInst *BI) {
+    llvm::errs() << "[rememberShortCircuitBranch]: " << BI->getName() << "\n";
+    if (FirstShortCircuitBranchSlot && !*FirstShortCircuitBranchSlot) {
+    llvm::errs() << "[rememberShortCircuitBranch]: filling slot\n";
+      *FirstShortCircuitBranchSlot = BI;}
+  }
   /// A jump destination is an abstract label, branching to which may
   /// require a jump out through normal cleanups.
 
@@ -282,6 +298,7 @@ public:
     void setScopeDepth(EHScopeStack::stable_iterator depth) {
       ScopeDepth = depth;
     }
+    
 
   private:
     llvm::BasicBlock *Block;
@@ -3540,7 +3557,12 @@ public:
     void EmitAttributedStmt(const AttributedStmt &S);
     void EmitGotoStmt(const GotoStmt &S);
     void EmitIndirectGotoStmt(const IndirectGotoStmt &S);
-    void EmitIfStmt(const IfStmt &S);
+    void addSuccessorMetadata(llvm::Instruction *Inst, llvm::ArrayRef<llvm::BasicBlock *> Successors);
+    void addSuccessorMetadata(
+    llvm::Instruction *Inst,
+    llvm::ArrayRef<llvm::BasicBlock *> Successors,
+    llvm::ArrayRef<llvm::ConstantInt *> CaseValues);
+             void EmitIfStmt(const IfStmt &S);
 
     void EmitWhileStmt(const WhileStmt &S,
                        ArrayRef<const Attr *> Attrs = std::nullopt);
@@ -5317,6 +5339,7 @@ public:
     llvm::Value *EmitAArch64CpuSupports(ArrayRef<StringRef> FeatureStrs);
   };
 
+
 inline DominatingLLVMValue::saved_type
 DominatingLLVMValue::save(CodeGenFunction &CGF, llvm::Value *value) {
   if (!needsSaving(value)) return saved_type(value, false);
@@ -5341,7 +5364,6 @@ inline llvm::Value *DominatingLLVMValue::restore(CodeGenFunction &CGF,
   return CGF.Builder.CreateAlignedLoad(alloca->getAllocatedType(), alloca,
                                        alloca->getAlign());
 }
-
 }  // end namespace CodeGen
 
 // Map the LangOption for floating point exception behavior into

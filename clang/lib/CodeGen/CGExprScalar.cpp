@@ -42,6 +42,7 @@
 #include "llvm/IR/MatrixBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/TypeSize.h"
+#include "llvm/MetadataKeys/MetadataKeys.h"
 #include <cstdarg>
 #include <optional>
 
@@ -800,62 +801,62 @@ public:
   Value *EmitShl(const BinOpInfo &Ops);
   Value *EmitShr(const BinOpInfo &Ops);
   Value *EmitAnd(const BinOpInfo &Ops) {
-      // Get SSA names
-  std::string LHSName = "unknown", RHSName = "unknown";
+    // Get SSA names
+    std::string LHSName = "unknown", RHSName = "unknown";
 
-  if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
-    LHSName = CGF.SSAMap[Ops.LHS];
-  else if (Ops.LHS->hasName()) {
-    LHSName = Ops.LHS->getName().str();
-    CGF.SSAMap[Ops.LHS] = LHSName;
-  }
+    if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
+      LHSName = CGF.SSAMap[Ops.LHS];
+    else if (Ops.LHS->hasName()) {
+      LHSName = Ops.LHS->getName().str();
+      CGF.SSAMap[Ops.LHS] = LHSName;
+    }
 
-  if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
-    RHSName = CGF.SSAMap[Ops.RHS];
-  else if (Ops.RHS->hasName()) {
-    RHSName = Ops.RHS->getName().str();
-    CGF.SSAMap[Ops.RHS] = RHSName;
-  }
+    if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
+      RHSName = CGF.SSAMap[Ops.RHS];
+    else if (Ops.RHS->hasName()) {
+      RHSName = Ops.RHS->getName().str();
+      CGF.SSAMap[Ops.RHS] = RHSName;
+    }
 
     return Builder.CreateAnd(Ops.LHS, Ops.RHS, "and");
   }
   Value *EmitXor(const BinOpInfo &Ops) {
-      // Get SSA names
-  std::string LHSName = "unknown", RHSName = "unknown";
+    // Get SSA names
+    std::string LHSName = "unknown", RHSName = "unknown";
 
-  if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
-    LHSName = CGF.SSAMap[Ops.LHS];
-  else if (Ops.LHS->hasName()) {
-    LHSName = Ops.LHS->getName().str();
-    CGF.SSAMap[Ops.LHS] = LHSName;
-  }
+    if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
+      LHSName = CGF.SSAMap[Ops.LHS];
+    else if (Ops.LHS->hasName()) {
+      LHSName = Ops.LHS->getName().str();
+      CGF.SSAMap[Ops.LHS] = LHSName;
+    }
 
-  if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
-    RHSName = CGF.SSAMap[Ops.RHS];
-  else if (Ops.RHS->hasName()) {
-    RHSName = Ops.RHS->getName().str();
-    CGF.SSAMap[Ops.RHS] = RHSName;
-  }
+    if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
+      RHSName = CGF.SSAMap[Ops.RHS];
+    else if (Ops.RHS->hasName()) {
+      RHSName = Ops.RHS->getName().str();
+      CGF.SSAMap[Ops.RHS] = RHSName;
+    }
 
     return Builder.CreateXor(Ops.LHS, Ops.RHS, "xor");
   }
   Value *EmitOr(const BinOpInfo &Ops) {
-      // Get SSA names
-  std::string LHSName = "unknown", RHSName = "unknown";
+    // Get SSA names
+    std::string LHSName = "unknown", RHSName = "unknown";
 
-  if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
-    LHSName = CGF.SSAMap[Ops.LHS];
-  else if (Ops.LHS->hasName()) {
-    LHSName = Ops.LHS->getName().str();
-    CGF.SSAMap[Ops.LHS] = LHSName;
-  }
+    if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
+      LHSName = CGF.SSAMap[Ops.LHS];
+    else if (Ops.LHS->hasName()) {
+      LHSName = Ops.LHS->getName().str();
+      CGF.SSAMap[Ops.LHS] = LHSName;
+    }
 
-  if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
-    RHSName = CGF.SSAMap[Ops.RHS];
-  else if (Ops.RHS->hasName()) {
-    RHSName = Ops.RHS->getName().str();
-    CGF.SSAMap[Ops.RHS] = RHSName;
-  }
+    if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
+      RHSName = CGF.SSAMap[Ops.RHS];
+    else if (Ops.RHS->hasName()) {
+      RHSName = Ops.RHS->getName().str();
+      CGF.SSAMap[Ops.RHS] = RHSName;
+    }
 
     return Builder.CreateOr(Ops.LHS, Ops.RHS, "or");
   }
@@ -941,6 +942,8 @@ public:
   Value *VisitBinAssign(const BinaryOperator *E);
 
   Value *VisitBinLAnd(const BinaryOperator *E);
+  void attachMCDCTreeMetadata(const BinaryOperator *E,
+                              llvm::BasicBlock *EntryBlock, llvm::PHINode *PN);
   Value *VisitBinLOr(const BinaryOperator *E);
   Value *VisitBinComma(const BinaryOperator *E);
 
@@ -3781,23 +3784,23 @@ void ScalarExprEmitter::EmitUndefinedBehaviorIntegerDivAndRemCheck(
 }
 
 Value *ScalarExprEmitter::EmitDiv(const BinOpInfo &Ops) {
-    // Get SSA names
-    std::string LHSName = "unknown", RHSName = "unknown";
+  // Get SSA names
+  std::string LHSName = "unknown", RHSName = "unknown";
 
-    if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
-      LHSName = CGF.SSAMap[Ops.LHS];
-    else if (Ops.LHS->hasName()) {
-      LHSName = Ops.LHS->getName().str();
-      CGF.SSAMap[Ops.LHS] = LHSName;
-    }
-  
-    if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
-      RHSName = CGF.SSAMap[Ops.RHS];
-    else if (Ops.RHS->hasName()) {
-      RHSName = Ops.RHS->getName().str();
-      CGF.SSAMap[Ops.RHS] = RHSName;
-    }
-  
+  if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
+    LHSName = CGF.SSAMap[Ops.LHS];
+  else if (Ops.LHS->hasName()) {
+    LHSName = Ops.LHS->getName().str();
+    CGF.SSAMap[Ops.LHS] = LHSName;
+  }
+
+  if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
+    RHSName = CGF.SSAMap[Ops.RHS];
+  else if (Ops.RHS->hasName()) {
+    RHSName = Ops.RHS->getName().str();
+    CGF.SSAMap[Ops.RHS] = RHSName;
+  }
+
   {
     CodeGenFunction::SanitizerScope SanScope(&CGF);
     if ((CGF.SanOpts.has(SanitizerKind::IntegerDivideByZero) ||
@@ -3847,23 +3850,23 @@ Value *ScalarExprEmitter::EmitDiv(const BinOpInfo &Ops) {
 }
 
 Value *ScalarExprEmitter::EmitRem(const BinOpInfo &Ops) {
-    // Get SSA names
-    std::string LHSName = "unknown", RHSName = "unknown";
+  // Get SSA names
+  std::string LHSName = "unknown", RHSName = "unknown";
 
-    if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
-      LHSName = CGF.SSAMap[Ops.LHS];
-    else if (Ops.LHS->hasName()) {
-      LHSName = Ops.LHS->getName().str();
-      CGF.SSAMap[Ops.LHS] = LHSName;
-    }
-  
-    if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
-      RHSName = CGF.SSAMap[Ops.RHS];
-    else if (Ops.RHS->hasName()) {
-      RHSName = Ops.RHS->getName().str();
-      CGF.SSAMap[Ops.RHS] = RHSName;
-    }
-  
+  if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
+    LHSName = CGF.SSAMap[Ops.LHS];
+  else if (Ops.LHS->hasName()) {
+    LHSName = Ops.LHS->getName().str();
+    CGF.SSAMap[Ops.LHS] = LHSName;
+  }
+
+  if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
+    RHSName = CGF.SSAMap[Ops.RHS];
+  else if (Ops.RHS->hasName()) {
+    RHSName = Ops.RHS->getName().str();
+    CGF.SSAMap[Ops.RHS] = RHSName;
+  }
+
   // Rem in C can't be a floating point type: C99 6.5.5p2.
   if ((CGF.SanOpts.has(SanitizerKind::IntegerDivideByZero) ||
        CGF.SanOpts.has(SanitizerKind::SignedIntegerOverflow)) &&
@@ -4398,23 +4401,23 @@ Value *ScalarExprEmitter::EmitFixedPointBinOp(const BinOpInfo &op) {
 }
 
 Value *ScalarExprEmitter::EmitSub(const BinOpInfo &op) {
-    // Get SSA names
-    std::string LHSName = "unknown", RHSName = "unknown";
+  // Get SSA names
+  std::string LHSName = "unknown", RHSName = "unknown";
 
-    if (CGF.SSAMap.find(op.LHS) != CGF.SSAMap.end())
-      LHSName = CGF.SSAMap[op.LHS];
-    else if (op.LHS->hasName()) {
-      LHSName = op.LHS->getName().str();
-      CGF.SSAMap[op.LHS] = LHSName;
-    }
-  
-    if (CGF.SSAMap.find(op.RHS) != CGF.SSAMap.end())
-      RHSName = CGF.SSAMap[op.RHS];
-    else if (op.RHS->hasName()) {
-      RHSName = op.RHS->getName().str();
-      CGF.SSAMap[op.RHS] = RHSName;
-    }
-  
+  if (CGF.SSAMap.find(op.LHS) != CGF.SSAMap.end())
+    LHSName = CGF.SSAMap[op.LHS];
+  else if (op.LHS->hasName()) {
+    LHSName = op.LHS->getName().str();
+    CGF.SSAMap[op.LHS] = LHSName;
+  }
+
+  if (CGF.SSAMap.find(op.RHS) != CGF.SSAMap.end())
+    RHSName = CGF.SSAMap[op.RHS];
+  else if (op.RHS->hasName()) {
+    RHSName = op.RHS->getName().str();
+    CGF.SSAMap[op.RHS] = RHSName;
+  }
+
   // The LHS is always a pointer if either side is.
   if (!op.LHS->getType()->isPointerTy()) {
     if (op.Ty->isSignedIntegerOrEnumerationType()) {
@@ -4557,23 +4560,23 @@ Value *ScalarExprEmitter::ConstrainShiftValue(Value *LHS, Value *RHS,
 }
 
 Value *ScalarExprEmitter::EmitShl(const BinOpInfo &Ops) {
-    // Get SSA names
-    std::string LHSName = "unknown", RHSName = "unknown";
+  // Get SSA names
+  std::string LHSName = "unknown", RHSName = "unknown";
 
-    if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
-      LHSName = CGF.SSAMap[Ops.LHS];
-    else if (Ops.LHS->hasName()) {
-      LHSName = Ops.LHS->getName().str();
-      CGF.SSAMap[Ops.LHS] = LHSName;
-    }
-  
-    if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
-      RHSName = CGF.SSAMap[Ops.RHS];
-    else if (Ops.RHS->hasName()) {
-      RHSName = Ops.RHS->getName().str();
-      CGF.SSAMap[Ops.RHS] = RHSName;
-    }
-  
+  if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
+    LHSName = CGF.SSAMap[Ops.LHS];
+  else if (Ops.LHS->hasName()) {
+    LHSName = Ops.LHS->getName().str();
+    CGF.SSAMap[Ops.LHS] = LHSName;
+  }
+
+  if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
+    RHSName = CGF.SSAMap[Ops.RHS];
+  else if (Ops.RHS->hasName()) {
+    RHSName = Ops.RHS->getName().str();
+    CGF.SSAMap[Ops.RHS] = RHSName;
+  }
+
   // TODO: This misses out on the sanitizer check below.
   if (Ops.isFixedPointOp())
     return EmitFixedPointBinOp(Ops);
@@ -4655,23 +4658,23 @@ Value *ScalarExprEmitter::EmitShl(const BinOpInfo &Ops) {
 }
 
 Value *ScalarExprEmitter::EmitShr(const BinOpInfo &Ops) {
-    // Get SSA names
-    std::string LHSName = "unknown", RHSName = "unknown";
+  // Get SSA names
+  std::string LHSName = "unknown", RHSName = "unknown";
 
-    if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
-      LHSName = CGF.SSAMap[Ops.LHS];
-    else if (Ops.LHS->hasName()) {
-      LHSName = Ops.LHS->getName().str();
-      CGF.SSAMap[Ops.LHS] = LHSName;
-    }
-  
-    if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
-      RHSName = CGF.SSAMap[Ops.RHS];
-    else if (Ops.RHS->hasName()) {
-      RHSName = Ops.RHS->getName().str();
-      CGF.SSAMap[Ops.RHS] = RHSName;
-    }
-  
+  if (CGF.SSAMap.find(Ops.LHS) != CGF.SSAMap.end())
+    LHSName = CGF.SSAMap[Ops.LHS];
+  else if (Ops.LHS->hasName()) {
+    LHSName = Ops.LHS->getName().str();
+    CGF.SSAMap[Ops.LHS] = LHSName;
+  }
+
+  if (CGF.SSAMap.find(Ops.RHS) != CGF.SSAMap.end())
+    RHSName = CGF.SSAMap[Ops.RHS];
+  else if (Ops.RHS->hasName()) {
+    RHSName = Ops.RHS->getName().str();
+    CGF.SSAMap[Ops.RHS] = RHSName;
+  }
+
   // TODO: This misses out on the sanitizer check below.
   if (Ops.isFixedPointOp())
     return EmitFixedPointBinOp(Ops);
@@ -4848,7 +4851,6 @@ Value *ScalarExprEmitter::EmitCompare(const BinaryOperator *E,
       Result = Builder.CreateICmp(UICmpOpc, LHS, RHS, "cmp");
     }
 
-
     if (LHSTy->isVectorType())
       return Builder.CreateSExt(Result, ConvertType(E->getType()), "sext");
 
@@ -4888,7 +4890,6 @@ Value *ScalarExprEmitter::EmitCompare(const BinaryOperator *E,
   return EmitScalarConversion(Result, CGF.getContext().BoolTy, E->getType(),
                               E->getExprLoc());
 }
-
 
 llvm::Value *CodeGenFunction::EmitWithOriginalRHSBitfieldAssignment(
     const BinaryOperator *E, Value **Previous, QualType *SrcType) {
@@ -4982,9 +4983,112 @@ Value *ScalarExprEmitter::VisitBinAssign(const BinaryOperator *E) {
   return EmitLoadOfLValue(LHS, E->getExprLoc());
 }
 
-Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
+void ScalarExprEmitter::attachMCDCTreeMetadata(const BinaryOperator *E,
+                                               llvm::BasicBlock *EntryBlock,
+                                               llvm::PHINode *PN) {
+  if (EntryBlock) {
+    if (auto *Branch =
+            dyn_cast_or_null<llvm::BranchInst>(EntryBlock->getTerminator())) {
+      if (Branch->isConditional()) {
+        llvm::LLVMContext &Ctx = CGF.getLLVMContext();
 
-  // Perform vector logical and on comparisons with zero vectors.
+        // Helper to stringify a block safely (never returns nullptr MDString)
+        auto getBlockNameMD = [&](llvm::BasicBlock *BB) -> llvm::MDString * {
+          if (!BB)
+            return llvm::MDString::get(Ctx, "<null_block>");
+          return llvm::MDString::get(Ctx, BB->getName().str());
+        };
+
+        std::function<llvm::MDNode *(const Expr *, llvm::BasicBlock *)>
+            buildMcdcMD =
+                [&](const Expr *Ex,
+                    llvm::BasicBlock *CurrentBlock) -> llvm::MDNode * {
+          llvm::errs() << "[buildMcdcMD] called for ";
+          Ex->printPretty(llvm::errs(), nullptr,
+                          CGF.getContext().getPrintingPolicy());
+          llvm::errs() << " with CurrentBlock: "
+                       << (CurrentBlock ? CurrentBlock->getName() : "<null>")
+                       << "\n";
+
+          // Defensive: null current block becomes a leaf with "<null_block>"
+          if (!CurrentBlock) {
+            return llvm::MDNode::get(
+                Ctx, {llvm::MDString::get(Ctx, "cond"),
+                      llvm::MDString::get(Ctx, "<null_block>")});
+          }
+
+          const auto *BO = dyn_cast<BinaryOperator>(Ex->IgnoreParenImpCasts());
+          if (!BO ||
+              (BO->getOpcode() != BO_LAnd && BO->getOpcode() != BO_LOr)) {
+            // Leaf condition
+            llvm::errs() << "[buildMcdcMD] Leaf condition reached for ";
+            E->printPretty(llvm::errs(), nullptr,
+                           CGF.getContext().getPrintingPolicy());
+            llvm::errs() << ", CurrentBlock: " << CurrentBlock->getName().str()
+                         << "\n";
+            return llvm::MDNode::get(Ctx, {llvm::MDString::get(Ctx, "cond"),
+                                           getBlockNameMD(CurrentBlock)});
+          }
+
+          // Recursive case: && / ||
+          llvm::BasicBlock *LHSBlockForNextCall = nullptr;
+          if (auto itlhs = CGF.ExprToBBMap.find(BO->getLHS());
+              itlhs != CGF.ExprToBBMap.end()) {
+            LHSBlockForNextCall = itlhs->second;
+          } else {
+            LHSBlockForNextCall = CurrentBlock;
+          }
+          llvm::MDNode *LhsNode =
+              buildMcdcMD(BO->getLHS(), LHSBlockForNextCall);
+
+          llvm::BasicBlock *RHSBlockForNextCall = nullptr;
+          if (auto it = CGF.ExprToBBMap.find(BO->getRHS());
+              it != CGF.ExprToBBMap.end()) {
+            RHSBlockForNextCall = it->second;
+          } else {
+            RHSBlockForNextCall = CurrentBlock;
+          }
+          llvm::MDNode *RhsNode =
+              buildMcdcMD(BO->getRHS(), RHSBlockForNextCall);
+
+          const char *OpStr = (BO->getOpcode() == BO_LOr) ? "||" : "&&";
+          llvm::errs() << "[buildMcdcMD] Combining LHS and RHS with Op: "
+                       << OpStr << "\n";
+
+          // Internal node: !"binop", !"&&"/"||", <lhs>, <rhs>
+          return llvm::MDNode::get(Ctx, {llvm::MDString::get(Ctx, "binop"),
+                                         llvm::MDString::get(Ctx, OpStr),
+                                         LhsNode, RhsNode});
+        };
+
+        llvm::errs() << "[attachMCDC:] Printing ExprToBBMap contents:\n";
+        for (const auto &Pair : CGF.ExprToBBMap) {
+          llvm::errs() << "  Expr: ";
+          (Pair.first)
+              ->printPretty(llvm::errs(), nullptr,
+                            CGF.getContext().getPrintingPolicy());
+          llvm::errs() << "  Block: "
+                       << ((Pair.second) ? (Pair.second)->getName() : "<null>")
+                       << "\n";
+        }
+
+        // Build the tree starting from the entry block context.
+        llvm::MDNode *McdcRoot = buildMcdcMD(E, EntryBlock);
+
+        // Attach structured metadata (tree)
+        Branch->setMetadata(llvm::mdk::CompoundConditionTree, McdcRoot);
+
+        CGF.rememberShortCircuitBranch(Branch);
+      }
+    }
+  }
+}
+
+Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
+  llvm::errs() << "[visitBinLAnd] Called for Expression: ";
+  E->printPretty(llvm::errs(), nullptr, CGF.getContext().getPrintingPolicy());
+  llvm::errs()
+      << "\n"; // Perform vector logical and on comparisons with zero vectors.
   if (E->getType()->isVectorType()) {
     CGF.incrementProfileCounter(E);
 
@@ -5053,14 +5157,16 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
   }
 
   // If the top of the logical operator nest, reset the MCDC temp to 0.
-  if (CGF.MCDCLogOpStack.empty())
+  llvm::BasicBlock *EntryBlock = nullptr;
+  if (CGF.MCDCLogOpStack.empty()) {
     CGF.maybeResetMCDCCondBitmap(E);
+    EntryBlock = Builder.GetInsertBlock();
+  }
 
   CGF.MCDCLogOpStack.push_back(E);
 
   llvm::BasicBlock *ContBlock = CGF.createBasicBlock("land.end");
   llvm::BasicBlock *RHSBlock = CGF.createBasicBlock("land.rhs");
-
   CodeGenFunction::ConditionalEvaluation eval(CGF);
 
   llvm::BasicBlock *LHSBlock = Builder.GetInsertBlock();
@@ -5068,24 +5174,12 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
   // Branch on the LHS first.  If it is false, go to the failure (cont) block.
   CGF.EmitBranchOnBoolExpr(E->getLHS(), RHSBlock, ContBlock,
                            CGF.getProfileCount(E->getRHS()));
-  
 
   // Any edges into the ContBlock are now from an (indeterminate number of)
   // edges from this first condition.  All of these values will be false.  Start
   // setting up the PHI node in the Cont Block for this.
   llvm::PHINode *PN =
       llvm::PHINode::Create(llvm::Type::getInt1Ty(VMContext), 2, "", ContBlock);
-
-  std::string exprStr;
-  llvm::raw_string_ostream os(exprStr);
-  llvm::LLVMContext &Ctx = PN->getContext();
-
-  E->printPretty(os, nullptr, PrintingPolicy(CGF.getLangOpts()));
-  os.flush();
-  
-  llvm::MDNode *MDInst = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, exprStr));
-  PN->setMetadata("multiple_conds", MDInst);
-
 
   for (llvm::pred_iterator PI = pred_begin(ContBlock), PE = pred_end(ContBlock);
        PI != PE; ++PI)
@@ -5123,10 +5217,15 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
   // Insert an entry into the phi node for the edge with the value of RHSCond.
   PN->addIncoming(RHSCond, RHSBlock);
 
+  // START of new line
+  CGF.ExprToBBMap[E->getRHS()] = RHSBlock;
+  // END of new line
   CGF.MCDCLogOpStack.pop_back();
   // If the top of the logical operator nest, update the MCDC bitmap.
-  if (CGF.MCDCLogOpStack.empty())
+  if (CGF.MCDCLogOpStack.empty()) {
     CGF.maybeUpdateMCDCTestVectorBitmap(E);
+    attachMCDCTreeMetadata(E, EntryBlock, PN);
+  }
 
   // Artificial location to preserve the scope information
   {
@@ -5134,22 +5233,14 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
     PN->setDebugLoc(Builder.getCurrentDebugLocation());
   }
 
-    // attach ContBlock->getName() to the first branch's metadata
-  if (llvm::Instruction *TI = LHSBlock->getTerminator()) {
-    llvm::LLVMContext &Ctx = TI->getContext();
-    llvm::MDNode *MDContBlock =
-    llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ContBlock->getName()));
-    TI->setMetadata("contblock_shortcircuit", MDContBlock);
-    llvm::errs() <<"[visitBinLand:] Attaching " << ContBlock->getName() <<"\n";
-  }
-
   // ZExt result to int.
   return Builder.CreateZExtOrBitCast(PN, ResTy, "land.ext");
 }
 
 Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
-  
-
+  llvm::errs() << "[visitBinLOR] Called for Expression: ";
+  E->printPretty(llvm::errs(), nullptr, CGF.getContext().getPrintingPolicy());
+  llvm::errs() << "\n";
   // Perform vector logical or on comparisons with zero vectors.
   if (E->getType()->isVectorType()) {
     CGF.incrementProfileCounter(E);
@@ -5219,41 +5310,31 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
   }
 
   // If the top of the logical operator nest, reset the MCDC temp to 0.
-  if (CGF.MCDCLogOpStack.empty())
+  bool isTopLevel = CGF.MCDCLogOpStack.empty();
+  llvm::BasicBlock *EntryBlock = nullptr;
+  if (isTopLevel) {
+    EntryBlock = Builder.GetInsertBlock();
+    // Reset MCDC temp only at the top level.
     CGF.maybeResetMCDCCondBitmap(E);
+  }
 
   CGF.MCDCLogOpStack.push_back(E);
 
   llvm::BasicBlock *ContBlock = CGF.createBasicBlock("lor.end");
   llvm::BasicBlock *RHSBlock = CGF.createBasicBlock("lor.rhs");
-
   CodeGenFunction::ConditionalEvaluation eval(CGF);
+  llvm::BasicBlock *LHSBlock = Builder.GetInsertBlock();
 
-  llvm::BasicBlock* LHSBlock = Builder.GetInsertBlock();
-  llvm::errs() << "[visitBinLor:] LHS is " << LHSBlock->getName() << "\n";
   // Branch on the LHS first.  If it is true, go to the success (cont) block.
   CGF.EmitBranchOnBoolExpr(E->getLHS(), ContBlock, RHSBlock,
                            CGF.getCurrentProfileCount() -
                                CGF.getProfileCount(E->getRHS()));
-
   // Any edges into the ContBlock are now from an (indeterminate number of)
   // edges from this first condition.  All of these values will be true.  Start
   // setting up the PHI node in the Cont Block for this.
   llvm::PHINode *PN =
       llvm::PHINode::Create(llvm::Type::getInt1Ty(VMContext), 2, "", ContBlock);
-  
-  std::string exprStr;
-  llvm::raw_string_ostream os(exprStr);
-  llvm::LLVMContext &Ctx = PN->getContext();
-
-  E->printPretty(os, nullptr, PrintingPolicy(CGF.getLangOpts()));
-  os.flush();
-  
-  llvm::MDNode *MDInst = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, exprStr));
-  PN->setMetadata("multiple_conds", MDInst);
-
-  
-      for (llvm::pred_iterator PI = pred_begin(ContBlock), PE = pred_end(ContBlock);
+  for (llvm::pred_iterator PI = pred_begin(ContBlock), PE = pred_end(ContBlock);
        PI != PE; ++PI)
     PN->addIncoming(llvm::ConstantInt::getTrue(VMContext), *PI);
 
@@ -5263,6 +5344,7 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
   CGF.EmitBlock(RHSBlock);
   CGF.incrementProfileCounter(E);
   Value *RHSCond = CGF.EvaluateExprAsBool(E->getRHS());
+  llvm::errs() << "[visitBinLOr] After EmitBranchOnBoolExpr for LHS\n";
 
   eval.end(CGF);
 
@@ -5288,17 +5370,12 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
   CGF.EmitBlock(ContBlock);
   PN->addIncoming(RHSCond, RHSBlock);
 
+  CGF.ExprToBBMap[E->getRHS()] = RHSBlock;
   CGF.MCDCLogOpStack.pop_back();
   // If the top of the logical operator nest, update the MCDC bitmap.
-  if (CGF.MCDCLogOpStack.empty())
+  if (CGF.MCDCLogOpStack.empty()) {
     CGF.maybeUpdateMCDCTestVectorBitmap(E);
-
-  if (llvm::Instruction *TI = LHSBlock->getTerminator()) {
-    llvm::LLVMContext &Ctx = TI->getContext();
-    llvm::MDNode *MDContBlock =
-    llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ContBlock->getName()));
-    TI->setMetadata("contblock_shortcircuit", MDContBlock);
-    llvm::errs() <<"[visitBinLor:] Attaching " << ContBlock->getName() <<"\n";
+    attachMCDCTreeMetadata(E, EntryBlock, PN);
   }
 
   // ZExt result to int.

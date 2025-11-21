@@ -22,6 +22,7 @@
 #include "llvm/IR/IntrinsicsX86.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/MetadataKeys/MetadataKeys.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
@@ -60,11 +61,237 @@ namespace llvm_cbe {
 using namespace llvm;
 
 static void extractOrigUsesDouble(Instruction &I, std::string &FirstOperandName,
-                            std::string &SecondOperandName);
+                                  std::string &SecondOperandName);
 
 static void extractOrigUsesSingle(Instruction &I, std::string &OperandName);
 
-static BasicBlock* SearchBasicBlockByLabel(Instruction &I, std::string key);
+static BasicBlock *SearchBasicBlockByLabel(Instruction &I, std::string key);
+
+static llvm::MDString *getMDString(llvm::Instruction &I, llvm::StringRef Name) {
+  if (llvm::MDNode *M = I.getMetadata(Name)) {
+    if (auto *S = llvm::dyn_cast<llvm::MDString>(M->getOperand(0)))
+      return S;
+  }
+  return nullptr;
+}
+
+void CWriter::emitCondition(const ConditionSource &C, llvm::Instruction *I) {
+  if (C.OverwriteCCTree) { // TODO: both null?
+    emitCompoundConditionRecursive(C.OverwriteCCTree,
+                                   C.OverwriteCCTreeInstruction);
+  } else if (C.IRValue) {
+    writeOperand(C.IRValue, ContextCasted);
+  } else {
+    // Fallback; this shouldn't normally happen.
+    Out << "/* missing condition */";
+  }
+}
+
+llvm::SmallVector<llvm::BasicBlock *, 8>
+getSuccessorsFromMD(llvm::Instruction *Inst) {
+  llvm::SmallVector<llvm::BasicBlock *, 8> Successors;
+
+  if (!Inst)
+    return Successors;
+
+  // 1. Get the Metadata Node
+  llvm::MDNode *Node =
+      Inst->getMetadata(llvm::mdk::CompoundConditionSuccessorsKey);
+  if (!Node)
+    return Successors;
+
+  // 3. Iterate over the operands
+  for (const llvm::MDOperand &Op : Node->operands()) {
+    llvm::Metadata *MD = Op.get();
+
+    // Check if it is a string
+    if (auto *MDStr = llvm::dyn_cast<llvm::MDString>(MD)) {
+      std::string Name = MDStr->getString().str();
+
+      // Handle explicit "null" placeholders we might have saved
+      if (Name == "null") {
+        Successors.push_back(nullptr);
+        continue;
+      }
+
+      Successors.push_back(SearchBasicBlockByLabel(*Inst, Name));
+    }
+  }
+
+  return Successors;
+}
+
+NormalizedBranch *
+CWriter::normalizeCompoundConditionSwitchInst(llvm::BranchInst &BI) {
+  auto *Res = new NormalizedBranch();
+  Res->Kind = NormalizedBranchKind::CCSwitch;
+  Res->CCSwitchInfo.Cond.OverwriteCCTree =
+      BI.getMetadata(llvm::mdk::CompoundConditionTree);
+  Res->CCSwitchInfo.Cond.OverwriteCCTreeInstruction = &BI;
+
+  llvm::SmallVector<llvm::BasicBlock *, 8> SavedSuccs =
+      getSuccessorsFromMD(&BI);
+
+  llvm::SmallVector<llvm::ConstantInt *, 8> CaseVals;
+
+  if (llvm::MDNode *CaseMD =
+          BI.getMetadata(llvm::mdk::CompoundConditionCaseValuesKey)) {
+    unsigned NumOps = CaseMD->getNumOperands();
+    CaseVals.reserve(NumOps);
+
+    for (unsigned i = 0; i < NumOps; ++i) {
+      llvm::Metadata *Op = CaseMD->getOperand(i).get();
+      llvm::ConstantInt *CI = nullptr;
+
+      if (auto *CM = llvm::dyn_cast<llvm::ConstantAsMetadata>(Op)) {
+        if (auto *C = llvm::dyn_cast<llvm::ConstantInt>(CM->getValue()))
+          CI = C;
+      } else if (auto *S = llvm::dyn_cast<llvm::MDString>(Op)) {
+        (void)S;
+        CI = nullptr;
+      }
+
+      CaseVals.push_back(CI);
+    }
+  }
+
+  for (unsigned i = 0; i < SavedSuccs.size(); ++i) {
+    llvm::BasicBlock *Succ = SavedSuccs[i];
+    llvm::ConstantInt *CaseVal =
+        (!CaseVals.empty() && i < CaseVals.size()) ? CaseVals[i] : nullptr;
+    Res->CCSwitchInfo.Cases.push_back(std::make_pair(CaseVal, Succ));
+  }
+
+  if (llvm::MDString *MDS = getMDString(BI, llvm::mdk::ContBlockKey)) {
+    std::string MDStr = MDS->getString().str();
+    Res->CCSwitchInfo.ExitBB = SearchBasicBlockByLabel(BI, MDStr);
+  }
+
+  if (llvm::MDString *MDS = getMDString(BI, llvm::mdk::DefaultSuccKey)) {
+    std::string MDStr = MDS->getString().str();
+    Res->CCSwitchInfo.DefaultBB = SearchBasicBlockByLabel(BI, MDStr);
+  }
+
+  return Res;
+}
+
+NormalizedBranch *
+CWriter::normalizeCompoundConditionIfBranch(llvm::BranchInst &BI) {
+  NormalizedBranch *Res = new NormalizedBranch{};
+
+  Res->Kind = NormalizedBranchKind::If;
+  Res->IfInfo.Cond.OverwriteCCTree =
+      BI.getMetadata(llvm::mdk::CompoundConditionTree);
+  Res->IfInfo.Cond.OverwriteCCTreeInstruction = &BI;
+  // MDString* SuccMDS = getMDString(BI,
+  // llvm::mdk::CompoundConditionSuccessorsKey); if (!SuccMDS)
+  //   return Res;
+
+  llvm::SmallVector<llvm::BasicBlock *, 8> SavedSuccs =
+      getSuccessorsFromMD(&BI);
+  if (!SavedSuccs.empty()) {
+    // For an IF statement, we know index 0 is Then, 1 is Else, 2 is Continue
+    Res->IfInfo.ThenBB = SavedSuccs.size() > 0 ? SavedSuccs[0] : nullptr;
+    Res->IfInfo.ElseBB = SavedSuccs.size() > 1 ? SavedSuccs[1] : nullptr;
+  }
+
+  MDString *ContBlockMDS = getMDString(BI, llvm::mdk::ContBlockKey);
+  if (!ContBlockMDS)
+    return Res;
+
+  Res->IfInfo.JoinBB =
+      SearchBasicBlockByLabel(BI, ContBlockMDS->getString().str());
+  return Res;
+}
+NormalizedBranch *CWriter::normalizeIfBranch(llvm::BranchInst &I) {
+  llvm::errs() << "[normalizeIfBranch] called for " << I << "\n";
+  NormalizedBranch *Res = new NormalizedBranch{};
+
+  // Must be conditional with two successors.
+  if (!I.isConditional() || I.getNumSuccessors() != 2)
+    return Res;
+
+  // Identify blocks.
+  BasicBlock *ThenBB = I.getSuccessor(0);
+  BasicBlock *ElseBB = I.getSuccessor(1);
+  llvm::MDString *IfContMDS = getMDString(I, llvm::mdk::ContBlockKey);
+  if (!IfContMDS)
+    return Res;
+  std::string JoinBBName = IfContMDS->getString().str();
+  BasicBlock *JoinBB = SearchBasicBlockByLabel(I, JoinBBName);
+  if (!JoinBB)
+    return Res;
+
+  // Fill in the IfShape.
+  Res->Kind = NormalizedBranchKind::If;
+  Res->IfInfo.Cond.IRValue = I.getCondition();
+  Res->IfInfo.ThenBB = ThenBB;
+  Res->IfInfo.ElseBB = ElseBB;
+  Res->IfInfo.JoinBB = JoinBB;
+
+  if (ElseBB != JoinBB) {
+    if (llvm::BranchInst *ElseBr =
+            dyn_cast<BranchInst>(ElseBB->getTerminator())) {
+      if (ElseBr->getMetadata("else_if")) {
+        Res->IfInfo.IsElseIf = true;
+      }
+    }
+  }
+
+  return Res;
+}
+
+NormalizedBranch *CWriter::normalizeBranch(llvm::BranchInst &I) {
+  // Reset output
+  NormalizedBranch *Res = new NormalizedBranch{};
+  llvm::errs() << "[normalizeBranch] called for " << I << "\n";
+
+  llvm::MDString *IfTagMDS = getMDString(I, llvm::mdk::IfTag);
+  if (IfTagMDS)
+    return normalizeIfBranch(I);
+
+  llvm::MDString *CCIfTagMDS =
+      getMDString(I, llvm::mdk::CompoundConditionIfTagKey);
+  if (CCIfTagMDS)
+    return normalizeCompoundConditionIfBranch(I);
+
+  llvm::MDString *CCSwitchTagMDS =
+      getMDString(I, llvm::mdk::CompoundConditionSwitchTagKey);
+  if (CCSwitchTagMDS)
+    return normalizeCompoundConditionSwitchInst(I);
+
+  llvm::MDString *CCReturnTagMDS =
+      getMDString(I, llvm::mdk::CompoundConditionReturnTagKey);
+  if (CCReturnTagMDS) {
+    Res->Kind = NormalizedBranchKind::CCReturn;
+    Res->CCReturnInfo.Cond.OverwriteCCTree =
+        I.getMetadata(llvm::mdk::CompoundConditionTree);
+    Res->CCReturnInfo.Cond.OverwriteCCTreeInstruction = &I;
+    return Res;
+  }
+
+  llvm::MDString *ForMDS = getMDString(I, llvm::mdk::ForTag);
+  if (ForMDS)
+    return normalizeForBranch(I);
+
+  llvm::MDString *WhileMDS = getMDString(I, llvm::mdk::WhileTag);
+  if (WhileMDS)
+    return normalizeWhileBranch(I);
+
+  llvm::MDString *LoopBreakMDS = getMDString(I, llvm::mdk::LoopBreakKey);
+  if (LoopBreakMDS) {
+    Res->Kind = NormalizedBranchKind::LoopBreak;
+    return Res;
+  }
+
+  llvm::MDString *UserIntroducedGotoMDS = getMDString(I, "user_introduced");
+  if (UserIntroducedGotoMDS) {
+    Res->Kind = NormalizedBranchKind::UserIntroducedGoto;
+    return Res;
+  }
+
+  return Res;
+}
 
 static cl::opt<bool> DeclareLocalsLate(
     "cbe-declare-locals-late",
@@ -1897,40 +2124,59 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
   llvm::errs() << "[writeOperandInternal] " << *Operand;
   if (customArgs.metadata != "") {
     llvm::errs() << " For operand " << *Operand << " got customArgs.metadata "
-    << customArgs.metadata << "\n";
+                 << customArgs.metadata << "\n";
     Out << customArgs.metadata;
     return;
   }
   if (PHINode *PN = dyn_cast<PHINode>(Operand)) {
-    llvm::errs() << " was a phi node ";
-    if (MDNode *MDCond = PN->getMetadata("multiple_conds")) {
-      llvm::errs() << " using multiple_conds\n";
-        if (MDString *MDSCond = dyn_cast<MDString>(MDCond->getOperand(0))) {
-          Out << "(" << MDSCond->getString().str() << ")";
-        }
-        return;
-      }
+    llvm::errs() << " was a phi node \n";
+    return;
+    // if (MDNode *MDCond = PN->getMetadata("multiple_conds")) {
+    //   llvm::errs() << " using multiple_conds\n";
+    //   if (MDString *MDSCond = dyn_cast<MDString>(MDCond->getOperand(0))) {
+    //     Out << "(" << MDSCond->getString().str() << ")";
+    //   }
+    //   return;
+    // }
   }
 
   // Load Inst: source
-  if (LoadInst *LI = dyn_cast<LoadInst>(Operand)) {
-    llvm::errs() << " was a load instruction\n";
-    Out << GetValueName(LI->getPointerOperand());
+  if (AllocaInst *AI = dyn_cast<AllocaInst>(Operand)) {
+    llvm::errs() << " was alloca instruction\n";
+    Out << AI->getName();
     return;
   }
-  if (Instruction *I = dyn_cast<Instruction>(Operand))
+  if (LoadInst *LI = dyn_cast<LoadInst>(Operand)) {
+    llvm::errs() << " was a load instruction\n";
+    // writeOperand(LI->getPointerOperand());
+    Out << LI->getPointerOperand()->getName();
+    return;
+  }
+  if (Instruction *I = dyn_cast<Instruction>(Operand)) {
     // Should we inline this instruction to build a tree?
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
+      llvm::errs() << " was an instruciton\n";
       if (customArgs.wrapInParens)
         Out << '(';
-      llvm::errs() << " was an instruciton\n";
       writeInstComputationInline(*I);
       if (customArgs.wrapInParens)
         Out << ')';
       return;
     }
 
-  
+    if (isa<SelectInst>(Operand)) {
+      llvm::errs() << " was a select instruction\n";
+      writeInstComputationInline(*I);
+      return;
+    }
+
+    if (isa<CallInst>(Operand)) {
+      llvm::errs() << " was a call instruction\n";
+      writeInstComputationInline(*I);
+      return;
+    }
+    llvm::errs() << "[writeOperandInternal] Value is not an instruction\n";
+  }
 
   Constant *CPV = dyn_cast<Constant>(Operand);
   if (CPV && !isa<GlobalValue>(CPV)) {
@@ -1938,16 +2184,16 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
     printConstant(CPV, Context);
     return;
   } else {
-      llvm::errs() << " No metadata\n";
-      Out << GetValueName(Operand);
-      return;
+    llvm::errs() << " No metadata\n";
+    Out << GetValueName(Operand);
+    return;
   }
 
-  llvm::errs() << " what the fuck\n";
+  llvm::errs() << " this shoudn't be printed\n";
 }
 
 static void extractOrigUsesDouble(Instruction &I, std::string &FirstOperandName,
-                            std::string &SecondOperandName) {
+                                  std::string &SecondOperandName) {
   if (Instruction *Inst = dyn_cast<Instruction>(&I)) {
     if (MDNode *MD = Inst->getMetadata("orig_loads")) {
       if (MDString *MDStr = dyn_cast<MDString>(MD->getOperand(0))) {
@@ -2003,7 +2249,7 @@ static void extractOrigUsesSingle(Instruction &I, std::string &OperandName) {
         if (colon != std::string::npos) {
           OperandName = MDStrValue.substr(colon + 1);
         }
-      }  
+      }
     }
   }
 }
@@ -4042,6 +4288,21 @@ bool CWriter::canDeclareLocalLate(Instruction &I) {
 }
 
 void CWriter::printFunction(Function &F) {
+  BlockNameToBlockPtrMap.clear();
+  unsigned tmpId = 0;
+  for (llvm::BasicBlock &BB : F) {
+    if (!BB.hasName()) {
+      BB.setName(("bb" + std::to_string(tmpId++)).c_str());
+    }
+    BlockNameToBlockPtrMap[BB.getName().str()] = &BB;
+  }
+  // for (const auto &entry : BlockNameToBlockPtrMap) {
+  //   llvm::errs() << "==== " << entry.getKey() << " ====\n";
+  //   entry.getValue()->print(llvm::errs());
+  //   llvm::errs() << "\n";
+  // }
+
+  // printing BlockName
   /// isStructReturn - Should this function actually return a struct by-value?
   bool isStructReturn = F.hasStructRetAttr();
 
@@ -4195,7 +4456,7 @@ void CWriter::printFunction(Function &F) {
     else if (!isEmptyType(I->getType()) && !isInlinableInst(*I)) {
       if (isa<PHINode>(*I))
         continue;
-      
+
       if (isa<CallInst>(*I))
         continue;
 
@@ -4246,15 +4507,16 @@ void CWriter::printFunction(Function &F) {
     std::string labelName = BB->getName().str();
     if (InlinedBlocks.count(&*BB)) {
       llvm::errs() << "[printFunction] Skipping " << labelName << "\n";
-        continue;
+      continue;
     }
     // skip land. or lor.
     // if (labelName.find("land.lhs") != std::string::npos ||
     //     labelName.find("land.rhs") != std::string::npos ||
     //     labelName.find("lor.lhs") != std::string::npos ||
     //     labelName.find("lor.rhs") != std::string::npos) {
-    if (labelName.find("land.") != std::string::npos ||
-        labelName.find("lor.") != std::string::npos) {
+    bool isCompCond = labelName.find("land.") != std::string::npos ||
+                      labelName.find("lor.") != std::string::npos;
+    if (isCompCond) {
       llvm::errs() << "[printFunction] Skipping " << labelName << "\n";
       continue;
     }
@@ -4263,7 +4525,11 @@ void CWriter::printFunction(Function &F) {
         printLoop(L);
     } else {
       llvm::errs() << "[printFunction] printBB for " << labelName << "\n";
-      printBasicBlock(&*BB, printBasicBlockCustomArgs(false, false, true));
+      bool noLabel = true;
+      if (isCompCond) {
+        noLabel = false;
+      }
+      printBasicBlock(&*BB, printBasicBlockCustomArgs(false, false, noLabel));
     }
   }
 
@@ -4287,10 +4553,15 @@ void CWriter::printLoop(Loop *L) {
 
 void CWriter::printBasicBlock(BasicBlock *BB,
                               printBasicBlockCustomArgs customArgs) {
+
+  if (!BB)
+    return;
   // Skip if this block has already been inlined
   if (InlinedBlocks.find(BB) != InlinedBlocks.end()) {
     return;
   }
+
+  llvm::errs() << "[printBasicBlock] Printing " << BB->getName().str() << "\n";
   InlinedBlocks.insert(BB);
 
   // SSA REVERSAL: extract this block's stores + allocas from MD
@@ -4465,13 +4736,16 @@ void CWriter::printBasicBlock(BasicBlock *BB,
         }
         Out << GetValueName(&*II) << " = ";
       }
-      writeInstComputationInline(*II);
 
-      bool skipClosingColon =
+      bool isUsedCall =
           isa<CallInst>(&*II) && cast<CallInst>(*II).getNumUses() != 0;
-      skipClosingColon = skipClosingColon || isa<PHINode>(&*II);
 
-      if (skipClosingColon)
+      if (!isUsedCall)
+        writeInstComputationInline(*II);
+
+      bool skipSemiColon = isUsedCall || isa<PHINode>(&*II);
+
+      if (skipSemiColon)
         continue; // closing semicolon will come from MD
 
       Out << ";\n";
@@ -4479,14 +4753,22 @@ void CWriter::printBasicBlock(BasicBlock *BB,
   }
 
   if (!customArgs.noTerminator) {
-    llvm::errs() << "[printBasicBlock] visiting terminator for " << BB->getName() << "\n";
+    llvm::errs() << "[printBasicBlock] visiting terminator for "
+                 << BB->getName() << "\n";
     visit(*BB->getTerminator());
   }
+}
+
+void CWriter::emitReturn(ReturnShape returnShape) {
+  Out << "return ";
+  emitCondition(returnShape.Cond);
+  Out << ";\n";
 }
 
 // Specific Instruction type classes... note that all of the casts are
 // necessary because we use the instruction classes as opaque types...
 void CWriter::visitReturnInst(ReturnInst &I) {
+  llvm::errs() << "[visitReturnInst] called for " << I << "\n";
   CurInstr = &I;
 
   // // check if there is metadata for the return instruction
@@ -4519,19 +4801,50 @@ void CWriter::visitReturnInst(ReturnInst &I) {
     return;
   }
 
-  Out << "  return";
+  ReturnShape retShape;
   if (I.getNumOperands()) {
-    Out << ' ';
-
-    std::string OperandName = "";
-    extractOrigUsesSingle(I, OperandName);
-    struct writeOperandCustomArgs args = writeOperandCustomArgs();
-    if (OperandName != "")
-      args.metadata = OperandName;
-
-    writeOperand(I.getOperand(0), ContextCasted, args);
+    retShape.Cond.IRValue = I.getOperand(0);
   }
-  Out << ";\n";
+  emitReturn(retShape);
+
+  // Out << "  return";
+  // if (I.getNumOperands()) {
+  //   Out << ' ';
+
+  //   std::string OperandName = "";
+  //   extractOrigUsesSingle(I, OperandName);
+  //   struct writeOperandCustomArgs args = writeOperandCustomArgs();
+  //   if (OperandName != "")
+  //     args.metadata = OperandName;
+
+  //   writeOperand(I.getOperand(0), ContextCasted, args);
+  // }
+  // Out << ";\n";
+}
+
+void CWriter::emitSwitch(SwitchShape switchShape) {
+  Out << "  switch (";
+  emitCondition(switchShape.Cond);
+  Out << ") {\n";
+
+  if (switchShape.DefaultBB) {
+    Out << "default:\n";
+    printBasicBlock(switchShape.DefaultBB,
+                    printBasicBlockCustomArgs(false, false, true));
+  }
+
+  for (const auto &Pair : switchShape.Cases) {
+    if (Pair.second) {
+      Out << "  case ";
+      writeOperand(Pair.first);
+      Out << ":\n";
+      printBasicBlock(Pair.second,
+                      printBasicBlockCustomArgs(false, false, true));
+    }
+  }
+  Out << "  }\n";
+  printBasicBlock(switchShape.ExitBB,
+                  printBasicBlockCustomArgs(false, false, true));
 }
 
 void CWriter::visitSwitchInst(SwitchInst &SI) {
@@ -4545,50 +4858,24 @@ void CWriter::visitSwitchInst(SwitchInst &SI) {
     printBranchToBlock(SI.getParent(), SI.getDefaultDest(), 2);
     Out << "\n";
   } else if (NumBits <= 64) { // model as a switch statement
-    Out << "  switch (";
-    std::string OperandName = "";
-    extractOrigUsesSingle(SI, OperandName);
-    struct writeOperandCustomArgs args = writeOperandCustomArgs();
-    if (OperandName != "")
-      args.metadata = OperandName;
-    writeOperand(Cond, ContextNormal, args);
-    Out << ") {\n  default:\n";
-    printBasicBlock(SI.getDefaultDest(),
-                    printBasicBlockCustomArgs(false, false, true));
-    // printPHICopiesForSuccessor(SI.getParent(), SI.getDefaultDest(), 2);
-    // printBranchToBlock(SI.getParent(), SI.getDefaultDest(), 2);
-
-    // Skip the first item since that's the default case.
+    // normalize to shape struct
+    SwitchShape switchShape;
+    switchShape.Cond.IRValue = Cond;
     for (SwitchInst::CaseIt i = SI.case_begin(), e = SI.case_end(); i != e;
          ++i) {
       ConstantInt *CaseVal = i->getCaseValue();
       BasicBlock *Succ = i->getCaseSuccessor();
-      Out << "  case ";
-      writeOperand(CaseVal);
-      Out << ":\n";
-      printBasicBlock(Succ, printBasicBlockCustomArgs(false, false, true));
-      // printPHICopiesForSuccessor(SI.getParent(), Succ, 2);
-      // if (isGotoCodeNecessary(SI.getParent(), Succ))
-      //   printBranchToBlock(SI.getParent(), Succ, 2);
-      // else
-      //   Out << "    break;\n";
+      switchShape.Cases.push_back(std::make_pair(CaseVal, Succ));
     }
-    Out << "  }\n";
-
-    // Get 'sw.exit' MD
-    if (MDNode *MD = SI.getMetadata("sw.exit")) {
-      if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
-        std::string MDStr = MDS->getString().str();
-        // search for the ExitBlock by MDStr
-        for (auto &BB : *SI.getParent()->getParent()) {
-          if (BB.getName() == MDStr) {
-            printBasicBlock(&BB, printBasicBlockCustomArgs(false, false, true));
-            break;
-          }
-        }
-      }
+    if (MDString *MDS = getMDString(SI, llvm::mdk::DefaultSuccKey)) {
+      std::string MDStr = MDS->getString().str();
+      switchShape.DefaultBB = SearchBasicBlockByLabel(SI, MDStr);
     }
-
+    if (MDString *MDS = getMDString(SI, llvm::mdk::ContBlockKey)) {
+      std::string MDStr = MDS->getString().str();
+      switchShape.ExitBB = SearchBasicBlockByLabel(SI, MDStr);
+    }
+    emitSwitch(switchShape);
   } else { // model as a series of if statements
     Out << "  ";
     for (SwitchInst::CaseIt i = SI.case_begin(), e = SI.case_end(); i != e;
@@ -4666,237 +4953,325 @@ void CWriter::printBranchToBlock(BasicBlock *CurBB, BasicBlock *Succ,
   }
 }
 
+void CWriter::emitIf(IfShape ifShape) {
+  Out << "if (";
+  emitCondition(ifShape.Cond);
+  Out << ")";
 
-void CWriter::visitBranchInstIfImpl(BranchInst &I) {
-  if (I.isConditional()) {
-    Out << "  if ";
-    writeOperand(I.getCondition(), ContextCasted);
-    Out << " {\n";
+  Out << " {\n";
+  printBasicBlock(ifShape.ThenBB,
+                  printBasicBlockCustomArgs(false, false, true));
+  Out << "}";
 
-    printBasicBlock(I.getSuccessor(0), printBasicBlockCustomArgs(false, false, true));
-    // Extract if.cont_block from metadata
-    BasicBlock *JoinBB = nullptr;
-    if (MDNode *MD = I.getMetadata("if.cont_block")) {
-      if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
-        std::string MDStr = MDS->getString().str();
-        // search for BB with name MDStr
-        for (auto &BB : *I.getParent()->getParent()) {
-          if (BB.getName() == MDStr) {
-            JoinBB = &BB;
-            break;
-          }
-        }
-      }
-    }
-
-    if (!JoinBB) {
-      llvm::errs()
-          << "Error: No if.cont_block metadata found for branch instruction: "<< I.getName()
-          <<"\n";
-      return;
-    }
-
-    bool isElseNecessary = I.getSuccessor(1) != JoinBB;
-    if (isElseNecessary) {
-      BasicBlock *ElseBB = I.getSuccessor(1);
-      bool isElseIf = false;
-      BranchInst *ElseBr;
-      if (ElseBr = dyn_cast<BranchInst>(ElseBB->getTerminator())) {
-        if (ElseBr->getMetadata("else_if")) {
-          isElseIf = true;
-        }
-      }
-
-      if (isElseIf) {
-        Out << " } else";
-        visitBranchInstIfImpl(*ElseBr);
-      } else {
-        Out << "  } else {\n";
-        printBasicBlock(ElseBB, printBasicBlockCustomArgs(false, false, true));
-        Out << "  }\n";
-      }
+  bool isElseNecessary = ifShape.ElseBB != ifShape.JoinBB;
+  if (isElseNecessary) {
+    Out << " else ";
+    if (ifShape.IsElseIf) {
+      if (BranchInst *ElseBr =
+              dyn_cast<BranchInst>(ifShape.ElseBB->getTerminator()))
+        visitBranchInst(*ElseBr);
     } else {
-      Out << "  }\n";
-    }
-
-    printBasicBlock(JoinBB, printBasicBlockCustomArgs(false, false, true));
-
-  } else {
-    if (MDNode *MD = I.getMetadata("user_introduced")) {
-      printBranchToBlock(I.getParent(), I.getSuccessor(0), 0);
-      return;
-    }
-
-    if (I.getSuccessor(0)->getName() == "return") {
-      printBasicBlock(I.getSuccessor(0),
+      Out << "{\n";
+      printBasicBlock(ifShape.ElseBB,
                       printBasicBlockCustomArgs(false, false, true));
+      Out << "}\n";
     }
   }
+  printBasicBlock(ifShape.JoinBB,
+                  printBasicBlockCustomArgs(false, false, true));
 }
 
-void CWriter::visitBranchInstForImpl(BranchInst &I) {
+static CmpInst *findLastCmpInBlock(BasicBlock &BB) {
+  for (auto I = BB.rbegin(), E = BB.rend(); I != E; ++I) {
+    if (auto *CI = dyn_cast<CmpInst>(&*I)) // matches icmp or fcmp
+      return CI;
+  }
+  return nullptr; // none found
+}
 
-  bool hasCondBlock = false;
-  bool hasIncBlock = false;
+// Helper: stringify an LLVM Value without printing to stdout/stderr.
+static std::string valueToString(const llvm::Value *V) {
+  std::string S;
+  llvm::raw_string_ostream OS(S);
+  // Use debug form to keep it compact but still readable in IR terms.
+  V->print(OS, /*IsForDebug=*/true);
+  OS.flush();
+  return S;
+}
 
+bool CWriter::compoundHasExistingBlock(llvm::MDNode *Node,
+                                       llvm::Instruction *I) {
+  if (!Node || Node->getNumOperands() == 0)
+    return false;
+
+  auto *Tag = llvm::dyn_cast<llvm::MDString>(Node->getOperand(0));
+  if (!Tag)
+    return false;
+
+  llvm::StringRef Kind = Tag->getString();
+
+  if (Kind == "cond") {
+    if (Node->getNumOperands() < 2)
+      return false;
+
+    auto *NameMS = llvm::dyn_cast<llvm::MDString>(Node->getOperand(1));
+    if (!NameMS)
+      return false;
+
+    llvm::StringRef BBName = NameMS->getString();
+    if (BBName.empty())
+      return false;
+
+    llvm::BasicBlock *BB = SearchBasicBlockByLabel(*I, BBName.str());
+    return BB != nullptr; // true only if the block exists
+  }
+
+  if (Kind == "binop") {
+    if (Node->getNumOperands() < 4)
+      return false;
+
+    auto *LhsMD = llvm::dyn_cast<llvm::MDNode>(Node->getOperand(2));
+    auto *RhsMD = llvm::dyn_cast<llvm::MDNode>(Node->getOperand(3));
+    if (!LhsMD && !RhsMD)
+      return false;
+
+    bool hasL = LhsMD ? compoundHasExistingBlock(LhsMD, I) : false;
+    bool hasR = RhsMD ? compoundHasExistingBlock(RhsMD, I) : false;
+    return hasL || hasR;
+  }
+
+  return false;
+}
+
+// Returns true if it printed something, false otherwise.
+bool CWriter::emitCompoundConditionRecursive(llvm::MDNode *Node,
+                                             llvm::Instruction *I) {
+  if (!Node || Node->getNumOperands() == 0)
+    return false;
+
+  auto *Tag = llvm::dyn_cast<llvm::MDString>(Node->getOperand(0));
+  if (!Tag)
+    return false;
+
+  llvm::StringRef Kind = Tag->getString();
+
+  if (Kind == "cond") {
+    // Leaf: !{ !"cond", !"blockName" }
+    if (Node->getNumOperands() < 2)
+      return false;
+
+    auto *NameMS = llvm::dyn_cast<llvm::MDString>(Node->getOperand(1));
+    if (!NameMS)
+      return false;
+
+    llvm::StringRef BBName = NameMS->getString();
+    if (BBName.empty())
+      return false;
+
+    llvm::BasicBlock *BB = SearchBasicBlockByLabel(*I, BBName.str());
+    if (!BB) {
+      // If you don't want any placeholder at all, just `return false;` here.
+      // Out << "<missing_block:" + BBName.str() + ">";
+      return false;
+    }
+
+    llvm::Instruction *TI = BB->getTerminator();
+    auto *BI = llvm::dyn_cast_or_null<llvm::BranchInst>(TI);
+    if (!BI || !BI->isConditional()) {
+      if (auto *PN = TI->getPrevNode()) {
+        if (llvm::Value *Val = llvm::dyn_cast_or_null<llvm::Value>(PN)) {
+          writeOperand(Val, ContextCasted);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    writeOperand(BI->getCondition(), ContextCasted);
+    return true;
+  }
+
+  if (Kind == "binop") {
+    // Internal: !{ !"binop", !"&&"/"||", <lhsNode>, <rhsNode> }
+    if (Node->getNumOperands() < 4)
+      return false;
+
+    auto *OpMS = llvm::dyn_cast<llvm::MDString>(Node->getOperand(1));
+    auto *LhsMD = llvm::dyn_cast<llvm::MDNode>(Node->getOperand(2));
+    auto *RhsMD = llvm::dyn_cast<llvm::MDNode>(Node->getOperand(3));
+
+    if (!OpMS)
+      return false;
+
+    llvm::StringRef Op = OpMS->getString(); // "&&" or "||"
+
+    // Look-ahead: do lhs / rhs actually have any existing blocks?
+    bool lhsExists = LhsMD ? compoundHasExistingBlock(LhsMD, I) : false;
+    bool rhsExists = RhsMD ? compoundHasExistingBlock(RhsMD, I) : false;
+
+    if (!lhsExists && !rhsExists)
+      return false;
+
+    if (lhsExists && rhsExists) {
+      Out << "(";
+      emitCompoundConditionRecursive(LhsMD, I); // must succeed given lhsExists
+      Out << " " << Op.str() << " ";
+      emitCompoundConditionRecursive(RhsMD, I); // must succeed given rhsExists
+      Out << ")";
+      return true;
+    }
+
+    // Only one side exists: print that side alone, *no operator*.
+    if (lhsExists) {
+      emitCompoundConditionRecursive(LhsMD, I);
+      return true;
+    }
+
+    if (rhsExists) {
+      emitCompoundConditionRecursive(RhsMD, I);
+      return true;
+    }
+
+    return false;
+  }
+
+  return false;
+}
+
+NormalizedBranch *CWriter::normalizeForBranch(llvm::BranchInst &I) {
+  llvm::errs() << "[normalizeForBranch] called for " << I << "\n";
+  NormalizedBranch *Res = new NormalizedBranch{};
+
+  // Condition block metadata: llvm::mdk::ConditionBlockKey
+  if (llvm::MDString *CMDS = getMDString(I, llvm::mdk::ConditionBlockKey)) {
+    Res->ForInfo.CondBB = SearchBasicBlockByLabel(I, CMDS->getString().str());
+  }
+  if (Res->ForInfo.CondBB) {
+    if (BranchInst *CondBr =
+            dyn_cast<BranchInst>(Res->ForInfo.CondBB->getTerminator())) {
+      llvm::MDString *CCMDs =
+          getMDString(*CondBr, llvm::mdk::CompoundConditionTree);
+      if (!CCMDs) {
+        Res->ForInfo.Cond.IRValue = CondBr->getCondition();
+      } else {
+        Res->ForInfo.Cond.OverwriteCCTree =
+            CondBr->getMetadata(llvm::mdk::CompoundConditionTree);
+        Res->ForInfo.Cond.OverwriteCCTreeInstruction = CondBr;
+      }
+    }
+  }
+
+  if (llvm::MDString *IMDS = getMDString(I, llvm::mdk::IncBlockKey)) {
+    Res->ForInfo.IncBB = SearchBasicBlockByLabel(I, IMDS->getString().str());
+  }
+
+  // TODO: make a seperate MD node for this
+  if (llvm::MDString *JMDS = getMDString(I, llvm::mdk::ContBlockKey)) {
+    Res->ForInfo.ExitBB = SearchBasicBlockByLabel(I, JMDS->getString().str());
+  }
+
+  if (llvm::MDString *BMDS = getMDString(I, llvm::mdk::BodyBlockKey)) {
+    Res->ForInfo.BodyBB = SearchBasicBlockByLabel(I, BMDS->getString().str());
+  }
+
+  Res->Kind = NormalizedBranchKind::For;
+  return Res;
+}
+
+void CWriter::emitFor(ForShape forShape) {
   Out << "for (;";
-
-  BranchInst *CondBr = dyn_cast<BranchInst>(I.getSuccessor(0)->getTerminator());
-  std::string OverwriteCond = "";
-  BasicBlock* ContBlock;
-  
-  llvm::errs() << "[visitBranchInstForImpl]: ";
-  if (MDNode *MD = I.getMetadata("for.cond")) {
-    llvm::errs() << "for.cond ";
-    hasCondBlock = true;
-    if (MDNode *MD = CondBr->getMetadata("contblock_shortcircuit")) {
-      llvm::errs() << "shortcircuit \n";
-      if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
-        ContBlock = SearchBasicBlockByLabel(I, MDS->getString().str());
-        if (auto *BI = dyn_cast<BranchInst>(ContBlock->getTerminator())) {
-          CondBr = BI;
-        }
-        InlinedBlocks.insert(ContBlock);
-        InlinedBlocks.insert(I.getSuccessor(0));
-      }
-    } else {
-      printBasicBlock(I.getSuccessor(0), printBasicBlockCustomArgs(false, true));
-    }
-    writeOperand(CondBr->getCondition(), ContextCasted,
-                 writeOperandCustomArgs(false));
+  if (forShape.CondBB) {
+    InlinedBlocks.insert(forShape.CondBB);
+    emitCondition(forShape.Cond);
   }
-
   Out << ";";
-
-  BasicBlock *IncBlock = nullptr;
-  if (MDNode *MD = I.getMetadata("for.inc")) {
-    llvm::errs() << " for.inc \n";
-    // fetch the inc block based on label name in MD
-    if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
-      IncBlock = SearchBasicBlockByLabel(I, MDS->getString().str());
-    }
-  }
-
-  if (IncBlock) {
-    printBasicBlock(IncBlock, printBasicBlockCustomArgs(true, true, true));
-  }
-
+  printBasicBlock(forShape.IncBB, printBasicBlockCustomArgs(true, true, true));
   Out << ") {\n";
+  printBasicBlock(forShape.BodyBB,
+                  printBasicBlockCustomArgs(false, false, true));
+  Out << "}\n";
+  printBasicBlock(forShape.ExitBB,
+                  printBasicBlockCustomArgs(false, false, true));
+}
 
-  BasicBlock *EndBlock = nullptr;
-  if (hasCondBlock) {
-    EndBlock = CondBr->getSuccessor(1);
-    printBasicBlock(CondBr->getSuccessor(0),
-                    printBasicBlockCustomArgs(false, false, true));
+NormalizedBranch *CWriter::normalizeWhileBranch(llvm::BranchInst &I) {
+  llvm::errs() << "[normalizeWhileBranch] called for " << I << "\n";
+  NormalizedBranch *Res = new NormalizedBranch{};
+  Res->WhileInfo.CondBB = SearchBasicBlockByLabel(
+      I, getMDString(I, llvm::mdk::ConditionBlockKey)->getString().str());
+
+  BranchInst *CondBr =
+      dyn_cast<BranchInst>(Res->WhileInfo.CondBB->getTerminator());
+
+  llvm::MDString *CCMDs =
+      getMDString(*CondBr, llvm::mdk::CompoundConditionTree);
+  if (!CCMDs) {
+    Res->WhileInfo.Cond.IRValue =
+        dyn_cast<BranchInst>(Res->WhileInfo.CondBB->getTerminator())
+            ->getCondition();
   } else {
-    printBasicBlock(I.getSuccessor(0),
-                    printBasicBlockCustomArgs(false, false, true));
-    if (MDNode *MD = I.getMetadata("for.start")) {
-      if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
-        std::string MDStr = MDS->getString().str();
-        // search for BB with name MDStr
-        for (auto &BB : *I.getParent()->getParent()) {
-          if (BB.getName() == MDStr) {
-            EndBlock = &BB;
-            break;
-          }
-        }
-      }
-    }
+    Res->WhileInfo.Cond.OverwriteCCTree =
+        CondBr->getMetadata(llvm::mdk::CompoundConditionTree);
+    Res->WhileInfo.Cond.OverwriteCCTreeInstruction = CondBr;
   }
 
+  Res->WhileInfo.ExitBB = SearchBasicBlockByLabel(
+      I, getMDString(I, llvm::mdk::ContBlockKey)->getString().str());
+  Res->WhileInfo.BodyBB = SearchBasicBlockByLabel(
+      I, getMDString(I, llvm::mdk::BodyBlockKey)->getString().str());
+
+  // TODO: extend to make use of compound conditions from metadata
+  Res->Kind = NormalizedBranchKind::While;
+  return Res;
+}
+
+void CWriter::emitWhile(WhileShape whileShape) {
+  llvm::errs() << "[emitWhile] called\n";
+  Out << "while (";
+  InlinedBlocks.insert(whileShape.CondBB);
+  emitCondition(whileShape.Cond);
+  Out << ") {\n";
+  printBasicBlock(whileShape.BodyBB,
+                  printBasicBlockCustomArgs(false, false, true));
   Out << "}\n";
-  printBasicBlock(EndBlock, printBasicBlockCustomArgs(false, false, true));
-  llvm::errs() << "[visitBranchInstForImpl] Ending\n";
-}
-
-void CWriter::visitBranchInstWhileImpl(BranchInst &I) {
-
-  // UC -> while.cond -> while.body UC -> while.cond ....
-  //               -> while.end UC
-
-  // should be responsible for emitting
-  // while(cond) {
-  //
-  //  visitBranchInst(term)
-  //
-  //}
-  // continued
-
-  // 1. simply visit br while.cond and do nothing.
-  
-  Out << "while";
-  llvm::errs() << "[visitBranchInstWhileImpl] ";
-  // cast body's conditional br to a branch inst
-  BranchInst *CondBr = dyn_cast<BranchInst>(I.getSuccessor(0)->getTerminator());
-   if (MDNode *MD = CondBr->getMetadata("contblock_shortcircuit")) {
-      llvm::errs() << "shortcircuit \n";
-      if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
-        BasicBlock* ContBlock = SearchBasicBlockByLabel(I, MDS->getString().str());
-        if (auto *BI = dyn_cast<BranchInst>(ContBlock->getTerminator())) {
-          CondBr = BI;
-        }
-        InlinedBlocks.insert(ContBlock);
-        InlinedBlocks.insert(I.getSuccessor(0));
-      }
-    } else {
-      printBasicBlock(I.getSuccessor(0), printBasicBlockCustomArgs(false, true));
-    }
-
-    writeOperand(CondBr->getCondition(), ContextCasted);
-    Out << " {\n";
-
-  // this will recursively handle the body
-  printBasicBlock(CondBr->getSuccessor(0),
-                  printBasicBlockCustomArgs(false, false, true));
-
-  Out << " }\n";
-  printBasicBlock(CondBr->getSuccessor(1),
+  llvm::errs() << "[emitWhile] printing exit block\n";
+  printBasicBlock(whileShape.ExitBB,
                   printBasicBlockCustomArgs(false, false, true));
 }
 
-void CWriter::visitBranchInst(BranchInst &I) {
+void CWriter::visitBranchInst(BranchInst &I,
+                              visitBranchInstCustomArgs customArgs) {
   CurInstr = &I;
   llvm::errs() << "[visitBranchInst] called for " << I << "\n";
 
-
-  if (MDNode *MD = I.getMetadata("for.start")) {
-    visitBranchInstForImpl(I);
+  NormalizedBranch *NBI = normalizeBranch(I);
+  NBI->printDetails();
+  switch (NBI->Kind) {
+  case NormalizedBranchKind::If:
+    emitIf(NBI->IfInfo);
     return;
-  }
-  // Check for "while.start" MD
-  if (MDNode *MD = I.getMetadata("while.start")) {
-    visitBranchInstWhileImpl(I);
+  case NormalizedBranchKind::For:
+    emitFor(NBI->ForInfo);
     return;
-  }
-
-  // If !llvm.loop MD exists, then its the last branch inst of the loop
-  if (MDNode *MD = I.getMetadata("llvm.loop")) {
+  case NormalizedBranchKind::While:
+    emitWhile(NBI->WhileInfo);
     return;
-  }
-
-  // look for "while.break" MD
-  if (MDNode *MD = I.getMetadata("while.break")) {
+  case NormalizedBranchKind::LoopBreak:
     Out << "break;\n";
     return;
-  }
-  
-  // search `sw.epilog` string in I.getSuccessor(0)->getName()
-  if (I.getSuccessor(0)->getName().find("sw.epilog") != std::string::npos) {
-    // This is the end of a switch case
+  case NormalizedBranchKind::UserIntroducedGoto:
+    printBranchToBlock(I.getParent(), I.getSuccessor(0), 0);
+    return;
+  case NormalizedBranchKind::CCSwitch:
+    emitSwitch(NBI->CCSwitchInfo);
+    return;
+  case NormalizedBranchKind::CCReturn:
+    emitReturn(NBI->CCReturnInfo);
+    return;
+  default:
+    llvm::errs() << "[visitBranchInst] falling back to basic impl\n";
     return;
   }
-
-  if (MDNode *MD = I.getMetadata("contblock_shortcircuit")) {
-    // visitBranchInstIfMultipleCondImpl(I);
-    if (MDString *MDS = dyn_cast<MDString>(MD->getOperand(0))) {
-      BasicBlock* ContBlock = SearchBasicBlockByLabel(I, MDS->getString().str());
-      printBasicBlock(ContBlock, printBasicBlockCustomArgs(false, false, true));
-    }
-    return;
-  }
-
-  visitBranchInstIfImpl(I);
 }
 
 // PHI nodes get copied into temporary values at the end of predecessor basic
@@ -5300,24 +5675,6 @@ void CWriter::visitSelectInst(SelectInst &I) {
   writeOperand(I.getFalseValue());
   Out << ")";
 }
-
-// void CWriter::visitSelectInst(SelectInst &I) {
-//   CurInstr = &I;
-
-//   Out << "llvm_select_";
-//   printTypeString(Out, I.getType(), false);
-//   Out << "(";
-//   writeOperand(I.getCondition(), ContextCasted);
-//   Out << ", ";
-//   writeOperand(I.getTrueValue(), ContextCasted);
-//   Out << ", ";
-//   writeOperand(I.getFalseValue(), ContextCasted);
-//   Out << ")";
-//   SelectDeclTypes.insert(I.getType());
-//   cwriter_assert(
-//       I.getCondition()->getType()->isVectorTy() ==
-//       I.getType()->isVectorTy()); // TODO: might be scalarty == vectorty
-// }
 
 // Returns the macro name or value of the max or min of an integer
 // type (as defined in limits.h).
@@ -5816,69 +6173,73 @@ bool CWriter::lowerIntrinsics(Function &F) {
 }
 
 void CWriter::visitCallInst(CallInst &I) {
-  CurInstr = &I;
-  bool resultUsed = (I.getNumUses() != 0);
-  if (resultUsed) {
-    return;
-  }
+  llvm::errs() << "[visitCallInst] called for instruction: " << I << "\n";
+  writeOperandInternal(I.getCalledOperand());
+  // CurInstr = &I;
+  // bool resultUsed = (I.getNumUses() != 0);
+  // if (resultUsed) {
+  //   return;
+  // }
 
-  if (isa<InlineAsm>(I.getCalledOperand()))
-    return visitInlineAsm(I);
+  // if (isa<InlineAsm>(I.getCalledOperand()))
+  //   return visitInlineAsm(I);
 
-  // Handle intrinsic function calls first...
-  if (Function *F = I.getCalledFunction()) {
-    auto ID = F->getIntrinsicID();
-    if (ID != Intrinsic::not_intrinsic && visitBuiltinCall(I, ID))
-      return;
-  }
+  // // Handle intrinsic function calls first...
+  // if (Function *F = I.getCalledFunction()) {
+  //   auto ID = F->getIntrinsicID();
+  //   if (ID != Intrinsic::not_intrinsic && visitBuiltinCall(I, ID))
+  //     return;
+  // }
 
-  Value *Callee = I.getCalledOperand();
-
-  // If this is a call to a struct-return function, assign to the first
-  // parameter instead of passing it to the call.
+  // Value *Callee = I.getCalledOperand();
+  // llvm::errs() << "[visitCallInst] Callee: " << *Callee << "\n";
+  // // If this is a call to a struct-return function, assign to the first
+  // // parameter instead of passing it to the call.
   const AttributeList &PAL = I.getAttributes();
   bool isStructRet = I.hasStructRetAttr();
-  if (isStructRet) {
-    writeOperandDeref(I.getArgOperand(0));
-    Out << " = ";
-  }
+  // if (isStructRet) {
+  //   writeOperandDeref(I.getArgOperand(0));
+  //   Out << " = ";
+  // }
 
-  if (I.isTailCall())
-    Out << " /*tail*/ ";
+  // if (I.isTailCall())
+  //   Out << " /*tail*/ ";
 
-  // If we are calling anything other than a function, then we need to cast
-  // since it will be an opaque pointer.
-  bool NeedsCast = !isa<Function>(Callee);
+  // // If we are calling anything other than a function, then we need to cast
+  // // since it will be an opaque pointer.
+  // bool NeedsCast = !isa<Function>(Callee);
 
-  // GCC is a real PITA.  It does not permit codegening casts of functions to
-  // function pointers if they are in a call (it generates a trap instruction
-  // instead!).  We work around this by inserting a cast to void* in between
-  // the function and the function pointer cast.  Unfortunately, we can't just
-  // form the constant expression here, because the folder will immediately
-  // nuke it.
-  //
-  // Note finally, that this is completely unsafe.  ANSI C does not guarantee
-  // that void* and function pointers have the same size. :( To deal with this
-  // in the common case, we handle casts where the number of arguments passed
-  // match exactly.
-  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Callee))
-    if (CE->isCast())
-      if (Function *RF = dyn_cast<Function>(CE->getOperand(0))) {
-        NeedsCast = true;
-        Callee = RF;
-      }
+  // // GCC is a real PITA.  It does not permit codegening casts of functions to
+  // // function pointers if they are in a call (it generates a trap instruction
+  // // instead!).  We work around this by inserting a cast to void* in between
+  // // the function and the function pointer cast.  Unfortunately, we can't
+  // just
+  // // form the constant expression here, because the folder will immediately
+  // // nuke it.
+  // //
+  // // Note finally, that this is completely unsafe.  ANSI C does not guarantee
+  // // that void* and function pointers have the same size. :( To deal with
+  // this
+  // // in the common case, we handle casts where the number of arguments passed
+  // // match exactly.
+  // if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Callee))
+  //   if (CE->isCast())
+  //     if (Function *RF = dyn_cast<Function>(CE->getOperand(0))) {
+  //       NeedsCast = true;
+  //       Callee = RF;
+  //     }
 
-  if (NeedsCast) {
-    // Ok, just cast the pointer type.
-    Out << "((" << getFunctionName(&I) << "*)(void*)";
-    writeOperand(Callee, ContextCasted);
-    Out << ')';
-  } else {
-    cwriter_assert(isa<Function>(Callee));
-    Out << GetValueName(Callee);
-  }
+  // if (NeedsCast) {
+  //   // Ok, just cast the pointer type.
+  //   Out << "((" << getFunctionName(&I) << "*)(void*)";
+  //   writeOperand(Callee, ContextCasted);
+  //   Out << ')';
+  // } else {
+  //   cwriter_assert(isa<Function>(Callee));
+  //   Out << GetValueName(Callee);
+  // }
 
-  Out << '(';
+  // Out << '(';
 
   bool PrintedArg = false;
   FunctionType *FTy = I.getFunctionType();
@@ -5927,7 +6288,7 @@ void CWriter::visitCallInst(CallInst &I) {
       writeOperand(*AI, ContextCasted);
     PrintedArg = true;
   }
-  Out << ')';
+  // Out << ')';
 }
 
 /// visitBuiltinCall - Handle the call to the specified builtin.  Returns true
@@ -6335,99 +6696,115 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
     return;
   }
 
-  Out << '(';
-  // Start with operand #2: First operand is the Ptr, and first indexing operand
-  // is special (thus it will print its own `&` if it needs it).
-  for (unsigned OperandIndex = 2; OperandIndex < NumOperands; ++OperandIndex) {
-    Out << "(&";
-  }
+  // ==========================
+  writeOperandInternal(Ptr);
+  // ==========================
+  // Out << '(';
+  // // Start with operand #2: First operand is the Ptr, and first indexing
+  // // operand is special (thus it will print its own `&` if it needs it).
+  // for (unsigned OperandIndex = 2; OperandIndex < NumOperands;
+  //      ++OperandIndex) {
+  //   Out << "(&";
+  // }
 
-  // The first index of a GEP is special. It does pointer arithmetic without
-  // indexing into the element type.
-  Value *FirstOp = I.getOperand();
-  cwriter_assert(!FirstOp->getType()->isVectorTy());
-  Type *IntoT = I.getIndexedType();
-  ++I;
-  if (!isConstantNull(FirstOp)) {
-    Out << "(&((";
-    printTypeName(Out, IntoT);
-    Out << "*)";
-    writeOperand(Ptr);
-    Out << ")[";
-    writeOperandWithCast(FirstOp, Instruction::GetElementPtr);
-    Out << "])";
-  } else {
-    // When the first index is 0 (very common) we can simplify it.
-    std::optional<Type *> ExposedType = tryGetTypeOfAddressExposedValue(Ptr);
-    if (ExposedType) {
-      // Print P rather than (&P)[0]
-      Out << '(';
-      if (SourceType && SourceType.value() != ExposedType.value()) {
-        Out << "(";
-        printTypeName(Out, SourceType.value());
-        Out << "*)";
-      }
-      Out << '&';
-      writeOperandInternal(Ptr);
-      Out << ')';
-    } else if (I != E && I.isStruct()) {
-      // If the second index is a struct index, print P->f instead of P[0].f
-      Out << "(((";
-      printTypeName(Out, I.getStructType());
-      Out << "*)";
-      writeOperand(Ptr);
-      Out << ")->field" << cast<ConstantInt>(I.getOperand())->getZExtValue()
-          << ')';
-      // Eat the struct index
-      ++I;
-      Out << ')';
-    } else {
-      // Print (*P)[1] instead of P[0][1] (more idiomatic)
-      Out << "((";
-      if (isEmptyType(IntoT)) {
-        if (VectorType *VT = dyn_cast<VectorType>(IntoT)) {
-          // std::cout << "Calling printTypeName in printGEPExpression\n";
-          printTypeName(Out, VT->getElementType());
-        } else if (ArrayType *AT = dyn_cast<ArrayType>(IntoT)) {
-          // std::cout << "Calling printTypeName in printGEPExpression\n";
-          printTypeName(Out, AT->getElementType());
-        } else {
-          llvm_unreachable("Unknown empty type");
-        }
-      } else {
-        // std::cout << "Calling printTypeName in printGEPExpression\n";
-        printTypeName(Out, IntoT);
-      }
-      Out << "*)";
-      writeOperand(Ptr);
-      Out << ")";
-    }
-  }
+  // // The first index of a GEP is special. It does pointer arithmetic without
+  // // indexing into the element type.
+  // Value *FirstOp = I.getOperand();
+  // cwriter_assert(!FirstOp->getType()->isVectorTy());
+  // Type *IntoT = I.getIndexedType();
+  // ++I;
+  // if (!isConstantNull(FirstOp)) {
+  //   Out << "(&((";
+  //   printTypeName(Out, IntoT);
+  //   Out << "*)";
+  //   writeOperand(Ptr);
+  //   Out << ")[";
+  //   writeOperandWithCast(FirstOp, Instruction::GetElementPtr);
+  //   Out << "])";
+  // } else {
+  //   // When the first index is 0 (very common) we can simplify it.
+  //   std::optional<Type *> ExposedType = tryGetTypeOfAddressExposedValue(Ptr);
+  //   if (ExposedType) {
+  //     // Print P rather than (&P)[0]
+  //     Out << '(';
+  //     if (SourceType && SourceType.value() != ExposedType.value()) {
+  //       Out << "(";
+  //       printTypeName(Out, SourceType.value());
+  //       Out << "*)";
+  //     }
+  //     Out << '&';
+  //     writeOperandInternal(Ptr);
+  //     Out << ')';
+  //   } else if (I != E && I.isStruct()) {
+  //     // If the second index is a struct index, print P->f instead of P[0].f
+  //     Out << "(((";
+  //     printTypeName(Out, I.getStructType());
+  //     Out << "*)";
+  //     writeOperand(Ptr);
+  //     Out << ")->field" << cast<ConstantInt>(I.getOperand())->getZExtValue()
+  //         << ')';
+  //     // Eat the struct index
+  //     ++I;
+  //     Out << ')';
+  //   } else {
+  //     // Print (*P)[1] instead of P[0][1] (more idiomatic)
+  //     Out << "((";
+  //     if (isEmptyType(IntoT)) {
+  //       if (VectorType *VT = dyn_cast<VectorType>(IntoT)) {
+  //         // std::cout << "Calling printTypeName in printGEPExpression\n";
+  //         printTypeName(Out, VT->getElementType());
+  //       } else if (ArrayType *AT = dyn_cast<ArrayType>(IntoT)) {
+  //         // std::cout << "Calling printTypeName in printGEPExpression\n";
+  //         printTypeName(Out, AT->getElementType());
+  //       } else {
+  //         llvm_unreachable("Unknown empty type");
+  //       }
+  //     } else {
+  //       // std::cout << "Calling printTypeName in printGEPExpression\n";
+  //       printTypeName(Out, IntoT);
+  //     }
+  //     Out << "*)";
+  //     writeOperand(Ptr);
+  //     Out << ")";
+  //   }
+  // }
 
+  int noOfOperands = 1;
   for (; I != E; ++I) {
-    Value *Opnd = I.getOperand();
-
-    cwriter_assert(
-        Opnd->getType()
-            ->isIntegerTy()); // TODO: indexing a Vector with a Vector is valid,
-                              // but we don't support it here
-
-    if (I.isStruct()) {
-      Out << "->field" << cast<ConstantInt>(Opnd)->getZExtValue();
-    } else if (IntoT->isArrayTy() && IntoT->getArrayNumElements() > 0) {
-      Out << "->array[";
-      writeOperandWithCast(Opnd, Instruction::GetElementPtr);
-      Out << ']';
-    } else {
-      Out << '[';
-      writeOperandWithCast(Opnd, Instruction::GetElementPtr);
-      Out << ']';
+    if (noOfOperands == 1) {
+      noOfOperands++;
+      continue;
     }
+    Value *Opnd = I.getOperand();
+    if (true) {
+      llvm::errs() << "[printGEPExpression] Operand No: " << noOfOperands
+                   << "\n";
+      Out << "[";
+      writeOperand(Opnd);
+      Out << "]";
+    }
+    // cwriter_assert(
+    //     Opnd->getType()
+    //         ->isIntegerTy()); // TODO: indexing a Vector with a Vector is
+    //         valid,
+    //                           // but we don't support it here
 
-    IntoT = I.getIndexedType();
-    Out << ')';
+    // if (I.isStruct()) {
+    //   Out << "->field" << cast<ConstantInt>(Opnd)->getZExtValue();
+    // } else if (IntoT->isArrayTy() && IntoT->getArrayNumElements() > 0) {
+    //   Out << "->array[";
+    //   writeOperandWithCast(Opnd, Instruction::GetElementPtr);
+    //   Out << ']';
+    // } else {
+    //   Out << '[';
+    //   writeOperandWithCast(Opnd, Instruction::GetElementPtr);
+    //   Out << ']';
+    // }
+
+    // IntoT = I.getIndexedType();
+    // Out << ')';
   }
-  Out << ')';
+  // Out << ')';
 }
 
 void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,

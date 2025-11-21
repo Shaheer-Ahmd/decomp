@@ -1845,13 +1845,27 @@ void CodeGenFunction::EmitBranchToCounterBlock(
 void CodeGenFunction::EmitBranchOnBoolExpr(
     const Expr *Cond, llvm::BasicBlock *TrueBlock, llvm::BasicBlock *FalseBlock,
     uint64_t TrueCount, Stmt::Likelihood LH, const Expr *ConditionalOp) {
+  // Log the condition and target blocks
+  llvm::errs() << "[EmitBranchOnBoolExpr] Condition: ";
+  if (Cond) {
+    Cond->printPretty(llvm::errs(), nullptr, getContext().getPrintingPolicy());
+  } else {
+    llvm::errs() << "<null>";
+  }
+  llvm::errs() << " | TrueBlock: ";
+  if (TrueBlock) llvm::errs() << TrueBlock->getName();
+  else llvm::errs() << "<null>";
+  llvm::errs() << " | FalseBlock: ";
+  if (FalseBlock) llvm::errs() << FalseBlock->getName();
+  else llvm::errs() << "<null>";
+  llvm::errs() << " | TrueCount: " << TrueCount << "\n";
+
   Cond = Cond->IgnoreParens();
 
   if (const BinaryOperator *CondBOp = dyn_cast<BinaryOperator>(Cond)) {
     // Handle X && Y in a condition.
     if (CondBOp->getOpcode() == BO_LAnd) {
       MCDCLogOpStack.push_back(CondBOp);
-
       // If we have "1 && X", simplify the code.  "0 && X" would have constant
       // folded if the case was simple enough.
       bool ConstantBool = false;
@@ -1879,6 +1893,8 @@ void CodeGenFunction::EmitBranchOnBoolExpr(
       // Emit the LHS as a conditional.  If the LHS conditional is false, we
       // want to jump to the FalseBlock.
       llvm::BasicBlock *LHSTrue = createBasicBlock("land.lhs.true");
+      ExprToBBMap[Cond] = LHSTrue;
+
       // The counter tells us how often we evaluate RHS, and all of TrueCount
       // can be propagated to that branch.
       uint64_t RHSCount = getProfileCount(CondBOp->getRHS());
@@ -2042,6 +2058,7 @@ void CodeGenFunction::EmitBranchOnBoolExpr(
   llvm::Value *CondV;
   {
     ApplyDebugLocation DL(*this, Cond);
+
     CondV = EvaluateExprAsBool(Cond);
   }
 
@@ -2086,7 +2103,10 @@ void CodeGenFunction::EmitBranchOnBoolExpr(
     Weights = createProfileWeights(TrueCount, CurrentCount - TrueCount);
   }
 
-  Builder.CreateCondBr(CondV, TrueBlock, FalseBlock, Weights, Unpredictable);
+  // Create the conditional branch and capture the resulting instruction.
+  llvm::BranchInst *BI =
+      Builder.CreateCondBr(CondV, TrueBlock, FalseBlock, Weights, Unpredictable);
+  ExprToBBMap[Cond] = BI->getParent();
 }
 
 /// ErrorUnsupported - Print out an error that codegen doesn't support the
@@ -2919,7 +2939,6 @@ void CodeGenFunction::EmitAArch64MultiVersionResolver(
          "Multiversion resolver requires target IFUNC support");
   bool AArch64CpuInitialized = false;
   llvm::BasicBlock *CurBlock = createBasicBlock("resolver_entry", Resolver);
-
   for (const MultiVersionResolverOption &RO : Options) {
     Builder.SetInsertPoint(CurBlock);
     llvm::Value *Condition = FormAArch64ResolverCondition(RO);
