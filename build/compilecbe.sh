@@ -1,0 +1,1 @@
+cd ../build-cbe/ && ninja llvm-cbe && cd ../build

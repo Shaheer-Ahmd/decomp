@@ -1,0 +1,1 @@
+../build-cbeoriginal/bin/llvm-cbe ./demotest/main.ll

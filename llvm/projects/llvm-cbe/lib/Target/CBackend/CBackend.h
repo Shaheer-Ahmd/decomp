@@ -171,6 +171,9 @@ struct NormalizedBranch {
     case NormalizedBranchKind::UserIntroducedGoto:
       llvm::errs() << "NormalizedBranchKind::UserIntroducedGoto\n";
       break;
+    case NormalizedBranchKind::CCReturn:
+      llvm::errs() << "NormalizedBranchKind::CCReturn\n";
+      break;
     case NormalizedBranchKind::CCSwitch:
       llvm::errs() << "NormalizedBranchKind::CCSwitch\n";
 

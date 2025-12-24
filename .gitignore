@@ -34,6 +34,12 @@
 !llvm/lib/Transforms/Utils/
 !llvm/lib/Transforms/Utils/PromoteMemoryToRegister.cpp
 
+!build/
+!build/*.sh
+
+!myplugin
+!myplugin/RemovePhiToStores.cpp
+
 !/run*.sh
 
 !/.gitignore

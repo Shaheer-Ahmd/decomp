@@ -60,12 +60,21 @@ namespace llvm_cbe {
 
 using namespace llvm;
 
-static void extractOrigUsesDouble(Instruction &I, std::string &FirstOperandName,
-                                  std::string &SecondOperandName);
-
-static void extractOrigUsesSingle(Instruction &I, std::string &OperandName);
-
 static BasicBlock *SearchBasicBlockByLabel(Instruction &I, std::string key);
+
+
+static std::string baseNameFromIRName(llvm::StringRef N) {
+  // Examples:
+  //   x.0.slot  -> x
+  //   x.0.load  -> x
+  //   x.addr    -> x
+  //   x.12      -> x
+  if (N.empty()) return "";
+
+  // Keep everything before the first '.'
+  auto Base = N.split('.').first;
+  return Base.str();
+}
 
 static llvm::MDString *getMDString(llvm::Instruction &I, llvm::StringRef Name) {
   if (llvm::MDNode *M = I.getMetadata(Name)) {
@@ -2074,6 +2083,8 @@ std::string CWriter::GetValueName(const Value *Operand) {
     return CBEMangle(Name);
   }
 
+  return baseNameFromIRName(Name);
+
   std::string VarName;
   VarName.reserve(Name.capacity());
 
@@ -2122,36 +2133,8 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
                                    writeOperandCustomArgs customArgs) {
 
   llvm::errs() << "[writeOperandInternal] " << *Operand;
-  if (customArgs.metadata != "") {
-    llvm::errs() << " For operand " << *Operand << " got customArgs.metadata "
-                 << customArgs.metadata << "\n";
-    Out << customArgs.metadata;
-    return;
-  }
-  if (PHINode *PN = dyn_cast<PHINode>(Operand)) {
-    llvm::errs() << " was a phi node \n";
-    return;
-    // if (MDNode *MDCond = PN->getMetadata("multiple_conds")) {
-    //   llvm::errs() << " using multiple_conds\n";
-    //   if (MDString *MDSCond = dyn_cast<MDString>(MDCond->getOperand(0))) {
-    //     Out << "(" << MDSCond->getString().str() << ")";
-    //   }
-    //   return;
-    // }
-  }
 
-  // Load Inst: source
-  if (AllocaInst *AI = dyn_cast<AllocaInst>(Operand)) {
-    llvm::errs() << " was alloca instruction\n";
-    Out << AI->getName();
-    return;
-  }
-  if (LoadInst *LI = dyn_cast<LoadInst>(Operand)) {
-    llvm::errs() << " was a load instruction\n";
-    // writeOperand(LI->getPointerOperand());
-    Out << LI->getPointerOperand()->getName();
-    return;
-  }
+
   if (Instruction *I = dyn_cast<Instruction>(Operand)) {
     // Should we inline this instruction to build a tree?
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
@@ -2164,18 +2147,20 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
       return;
     }
 
-    if (isa<SelectInst>(Operand)) {
-      llvm::errs() << " was a select instruction\n";
-      writeInstComputationInline(*I);
-      return;
-    }
+    // if (isa<SelectInst>(Operand)) {
+    //   llvm::errs() << " was a select instruction\n";
+    //   writeInstComputationInline(*I);
+    //   return;
+    // }
 
-    if (isa<CallInst>(Operand)) {
-      llvm::errs() << " was a call instruction\n";
-      writeInstComputationInline(*I);
-      return;
-    }
-    llvm::errs() << "[writeOperandInternal] Value is not an instruction\n";
+    // if (isa<CallInst>(Operand)) {
+    //   llvm::errs() << " was a call instruction\n";
+    //   writeInstComputationInline(*I);
+    //   return;
+    // }
+    // llvm::errs() << "[writeOperandInternal] Value is not an instruction\n";
+    // writeInstComputationInline(*I);
+    // return;
   }
 
   Constant *CPV = dyn_cast<Constant>(Operand);
@@ -2184,74 +2169,12 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
     printConstant(CPV, Context);
     return;
   } else {
-    llvm::errs() << " No metadata\n";
+    llvm::errs() << " get value name\n";
     Out << GetValueName(Operand);
     return;
   }
 
   llvm::errs() << " this shoudn't be printed\n";
-}
-
-static void extractOrigUsesDouble(Instruction &I, std::string &FirstOperandName,
-                                  std::string &SecondOperandName) {
-  if (Instruction *Inst = dyn_cast<Instruction>(&I)) {
-    if (MDNode *MD = Inst->getMetadata("orig_loads")) {
-      if (MDString *MDStr = dyn_cast<MDString>(MD->getOperand(0))) {
-        // MDStr ~ <OperandNumber>:<OperandName>
-        std::string MDStrValue = MDStr->getString().str();
-        size_t colon = MDStrValue.find(":");
-        if (colon != std::string::npos) {
-          std::string OperandNumber = MDStrValue.substr(0, colon);
-          switch (std::stoi(OperandNumber)) {
-          case 0:
-            FirstOperandName = MDStrValue.substr(colon + 1);
-            break;
-          case 1:
-            SecondOperandName = MDStrValue.substr(colon + 1);
-            break;
-          default:
-            llvm::errs() << "//error extracting orig uses\n";
-          }
-        }
-      }
-      if (MD->getNumOperands() > 1) {
-        if (MDString *MDStr = dyn_cast<MDString>(MD->getOperand(1))) {
-          // MDStr ~ <OperandNumber>:<OperandName>
-          std::string MDStrValue = MDStr->getString().str();
-          llvm::errs() << "\n\n\nSEGFAULT DEBUGGGERSSSSSS\n\n\n";
-          size_t colon = MDStrValue.find(":");
-          if (colon != std::string::npos) {
-            std::string OperandNumber = MDStrValue.substr(0, colon);
-            switch (std::stoi(OperandNumber)) {
-            case 0:
-              FirstOperandName = MDStrValue.substr(colon + 1);
-              break;
-            case 1:
-              SecondOperandName = MDStrValue.substr(colon + 1);
-              break;
-            default:
-              llvm::errs() << "error extracting orig uses\n";
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-static void extractOrigUsesSingle(Instruction &I, std::string &OperandName) {
-  if (Instruction *Inst = dyn_cast<Instruction>(&I)) {
-    if (MDNode *MD = Inst->getMetadata("orig_loads")) {
-      if (MDString *MDStr = dyn_cast<MDString>(MD->getOperand(0))) {
-        // MDStr ~ <OperandNumber>:<OperandName>
-        std::string MDStrValue = MDStr->getString().str();
-        size_t colon = MDStrValue.find(":");
-        if (colon != std::string::npos) {
-          OperandName = MDStrValue.substr(colon + 1);
-        }
-      }
-    }
-  }
 }
 
 static BasicBlock *SearchBasicBlockByLabel(Instruction &I, std::string key) {
@@ -4394,6 +4317,9 @@ void CWriter::printFunction(Function &F) {
     //   PrintedVar = true;
     // }
     if (AllocaInst *AI = isDirectAlloca(&*I)) {
+      llvm::errs()
+          << "[printFunction] isDirectAlloca found for " << GetValueName(AI)
+          << "\n";
       unsigned Alignment = AI->getAlign().value();
       bool IsOveraligned =
           Alignment &&
@@ -4404,43 +4330,10 @@ void CWriter::printFunction(Function &F) {
         Out << "__PREFIXALIGN__(" << Alignment << ") ";
       }
       bool metadata_extracted = false;
-      // All allocas should have ssa_info always (hopefully)
-      if (MDNode *VarInfo =
-              AI->getMetadata("ssa_info")) { // extract metadata info about
-                                             // variable declarations - bilal
-        // std::cout << "Metadata found for variable\n";
-
-        if (MDString *MDStr = dyn_cast<MDString>(VarInfo->getOperand(0))) {
-          std::string VarTypeStr = MDStr->getString().str();
-
-          size_t firstColon = VarTypeStr.find(":");
-          size_t secondColon = VarTypeStr.find(":", firstColon + 1);
-
-          if (firstColon != std::string::npos &&
-              secondColon != std::string::npos) {
-            std::string ExtractedType =
-                VarTypeStr.substr(firstColon + 2, secondColon - firstColon - 3);
-            // std::cout << "Extracted Type: " << ExtractedType << "\n";
-            metadata_extracted = true;
-
-            // Use extracted type for printing
-            customPrintSimpleType(Out, ExtractedType);
-          } else {
-            // Metadata format is incorrect, fallback to default printing
-            printTypeNameForAddressableValue(Out, AI->getAllocatedType(),
-                                             false);
-          }
-        }
-      } else {
-        // No metadata found, fallback to default printing
-        // std::cout << "Metadata not found for variable, using default type
-        // printing\n";
-        printTypeNameForAddressableValue(Out, AI->getAllocatedType(), false);
-      }
+      // ssa_info
+      printTypeNameForAddressableValue(Out, AI->getAllocatedType(), false);
 
       Out << ' ' << GetValueName(AI);
-      std::cout << "printing " << GetValueName(AI) << ";\n";
-
       if (IsOveraligned) {
         headerUseAligns();
         Out << " __POSTFIXALIGN__(" << Alignment << ")";
@@ -4564,100 +4457,6 @@ void CWriter::printBasicBlock(BasicBlock *BB,
   llvm::errs() << "[printBasicBlock] Printing " << BB->getName().str() << "\n";
   InlinedBlocks.insert(BB);
 
-  // SSA REVERSAL: extract this block's stores + allocas from MD
-  struct storeInfoSSAReversal {
-    int store_id;
-    std::string block;
-    std::string assign;
-  };
-
-  struct allocaInfoSSAReversal {
-    int alloca_id;
-    std::string name;
-    std::string type;
-    std::string block;
-  };
-
-  Module *M = BB->getModule();
-
-  // === Parse store_infos (block-specific) ===
-  std::vector<storeInfoSSAReversal> storeInfosForBB;
-  if (auto *NM = M->getNamedMetadata("store_infos")) {
-    for (auto *Op : NM->operands()) { // Op = !8, !9, !10 ...
-      if (auto *MD = dyn_cast<MDNode>(Op)) {
-        storeInfoSSAReversal info{};
-        bool blockMatches = false;
-
-        for (auto &Elt : MD->operands()) {
-          if (auto *S = dyn_cast<MDString>(Elt)) {
-            StringRef str = S->getString();
-
-            if (str.starts_with("store_id:")) {
-              info.store_id = std::stoi(str.substr(strlen("store_id:")).str());
-            } else if (str.starts_with("block:")) {
-              info.block = str.substr(strlen("block:")).str();
-              if (info.block == BB->getName().str())
-                blockMatches = true;
-            } else if (str.starts_with("assign:")) {
-              info.assign = str.substr(strlen("assign:")).str();
-            }
-          }
-        }
-
-        if (blockMatches)
-          storeInfosForBB.push_back(info);
-      }
-    }
-  }
-
-  // === Parse alloca_infos (now block-specific too) ===
-  std::vector<allocaInfoSSAReversal> allocaInfosForBB;
-  if (auto *NM = M->getNamedMetadata("alloca_infos")) {
-    for (auto *Op : NM->operands()) { // Op = !6, !7 ...
-      if (auto *MD = dyn_cast<MDNode>(Op)) {
-        allocaInfoSSAReversal info{};
-        bool blockMatches = false;
-
-        for (auto &Elt : MD->operands()) {
-          if (auto *S = dyn_cast<MDString>(Elt)) {
-            StringRef str = S->getString();
-
-            if (str.starts_with("alloca_id:")) {
-              info.alloca_id =
-                  std::stoi(str.substr(strlen("alloca_id:")).str());
-            } else if (str.starts_with("name:")) {
-              info.name = str.substr(strlen("name:")).str();
-            } else if (str.starts_with("type:")) {
-              info.type = str.substr(strlen("type:")).str();
-            } else if (str.starts_with("block:")) {
-              info.block = str.substr(strlen("block:")).str();
-              if (info.block == BB->getName().str())
-                blockMatches = true;
-            }
-          }
-        }
-
-        if (blockMatches)
-          allocaInfosForBB.push_back(info);
-      }
-    }
-  }
-
-  // 🔎 Debug dump
-
-  for (const auto &ai : allocaInfosForBB) {
-    llvm::errs() << "ALLOCA id=" << ai.alloca_id << ", name=" << ai.name
-                 << ", type=" << ai.type << ", block=" << ai.block << "\n";
-    Out << ai.type << " " << ai.name << ";\n";
-  }
-  for (const auto &si : storeInfosForBB) {
-    llvm::errs() << "STORE  id=" << si.store_id << ", block=" << si.block
-                 << ", assign=" << si.assign << "\n";
-    Out << si.assign;
-    if (!customArgs.isForIncBlock)
-      Out << ";\n";
-  }
-
   if (!customArgs.noLabel) {
     // Check if we need a label
     bool NeedsLabel = false;
@@ -4679,71 +4478,39 @@ void CWriter::printBasicBlock(BasicBlock *BB,
 
   // Output all instructions in the basic block
   for (BasicBlock::iterator II = BB->begin(), E = --BB->end(); II != E; ++II) {
-    // Your existing instruction processing logic here
-    // (metadata handling, debug info, etc.)
-
-    // Apply your metadata filtering
-    std::vector<std::string> MetadataKeys = {
-        "load_info", "call_info", "store_info", "ssa_info", "orig_loads"};
-    bool skipInstruction = false;
-
-    for (const std::string &Key : MetadataKeys) {
-      MDNode *MD = II->getMetadata(Key);
-      if (MD) {
-        MDString *MDS = dyn_cast<MDString>(MD->getOperand(0));
-        if (MDS) {
-          if (Key == "load_info" || Key == "call_info") {
-            skipInstruction = true;
-            break;
-          } else if (Key == "store_info") {
-            skipInstruction = true;
-            std::string storeInfo = MDS->getString().str();
-            storeInfo = std::regex_replace(
-                storeInfo, std::regex("\\b(\\w+)\\.addr\\b"), "$1");
-
-            std::string temp = storeInfo;
-            temp.erase(std::remove_if(temp.begin(), temp.end(), ::isspace),
-                       temp.end());
-            if (temp.find("=") != std::string::npos) {
-              std::string lhs = temp.substr(0, temp.find("="));
-              std::string rhs = temp.substr(temp.find("=") + 1);
-              if (lhs != rhs) {
-                Out << storeInfo;
-                if (!customArgs.isForIncBlock)
-                  Out << ";\n";
-              }
-            }
-            break;
-          } else if (Key == "orig_loads")
-            skipInstruction = true; // skip assignments
-        }
-      }
-    }
-
-    if (skipInstruction)
-      continue;
 
     if (!isInlinableInst(*II) && !isDirectAlloca(&*II)) {
       Out << "  ";
 
       bool originalEmitAssign =
           !isEmptyType(II->getType()) && !isInlineAsm(*II);
-      bool EmitAssign =
-          !isa<CallInst>(&*II) && !isa<PHINode>(&*II) && originalEmitAssign;
+      bool EmitAssign = originalEmitAssign;
+      if (isa<CallInst>(&*II) || isa<LoadInst>(&*II) || isa<PHINode>(&*II))
+        EmitAssign = false;
+      //  =(!isa<CallInst>(&*II) && !isa<PHINode>(&*II)) || originalEmitAssign;
       if (EmitAssign) {
         if (canDeclareLocalLate(*II)) {
           printTypeName(Out, II->getType(), false) << ' ';
         }
-        Out << GetValueName(&*II) << " = ";
+        llvm::errs() << "[printBasicBlock] emitting " <<
+            GetValueName(&*II) << "\n"; Out << GetValueName(&*II) << " = ";
+      } else {
+        llvm::errs() << "[printBasicBlock] Do not emit " << GetValueName(&*II) << "\n";
       }
 
       bool isUsedCall =
           isa<CallInst>(&*II) && cast<CallInst>(*II).getNumUses() != 0;
 
       if (!isUsedCall)
-        writeInstComputationInline(*II);
+      {
+        if(!isa<LoadInst>(&*II)) {
+          llvm::errs() << "[printBasicBlock] writeInstComputationInline for " << cast<LoadInst>(*II) << "\n";
+          writeInstComputationInline(*II);
+        }
+      }
 
-      bool skipSemiColon = isUsedCall || isa<PHINode>(&*II);
+      bool skipSemiColon =
+          isUsedCall || isa<PHINode>(&*II) || isa<LoadInst>(&*II);
 
       if (skipSemiColon)
         continue; // closing semicolon will come from MD
@@ -5278,6 +5045,7 @@ void CWriter::visitBranchInst(BranchInst &I,
 // blocks.  We now need to copy these temporary values into the REAL value for
 // the PHI.
 void CWriter::visitPHINode(PHINode &I) {
+  llvm::errs() << "[visitPHINode] called for " << I << "\n";
   return;
   CurInstr = &I;
 
@@ -5413,19 +5181,8 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
     // Write out the cast of the instruction's value back to the proper type
     // if necessary.
     // bool NeedsClosingParens = writeInstructionCast(I);
-    std::string FirstOperandName = "";
-    std::string SecondOperandName = "";
 
-    extractOrigUsesDouble(I, FirstOperandName, SecondOperandName);
-    // Certain instructions require the operand to be forced to a specific type
-    // so we use writeOperandWithCast here instead of writeOperand. Similarly
-    // below for operand 1
-    // writeOperandWithCast(I.getOperand(0), I.getOpcode());
-    struct writeOperandCustomArgs args = writeOperandCustomArgs();
-    if (FirstOperandName != "")
-      args.metadata = FirstOperandName;
-
-    writeOperand(I.getOperand(0), ContextNormal, args);
+    writeOperand(I.getOperand(0), ContextNormal);
 
     switch (I.getOpcode()) {
     case Instruction::Add:
@@ -5472,11 +5229,7 @@ void CWriter::visitBinaryOperator(BinaryOperator &I) {
     }
 
     // writeOperandWithCast(I.getOperand(1), I.getOpcode());
-    args.metadata = "";
-    if (SecondOperandName != "")
-      args.metadata = SecondOperandName;
-
-    writeOperand(I.getOperand(1), ContextNormal, args);
+    writeOperand(I.getOperand(1), ContextNormal);
     // if (NeedsClosingParens)
     //   Out << "))";
   }
@@ -5506,14 +5259,7 @@ void CWriter::visitICmpInst(ICmpInst &I) {
 
   NeedsClosingParens = writeInstructionCast(I);
 
-  std::string FirstOperandName = "";
-  std::string SecondOperandName = "";
-  extractOrigUsesDouble(I, FirstOperandName, SecondOperandName);
-  struct writeOperandCustomArgs args = writeOperandCustomArgs();
-  if (FirstOperandName != "")
-    args.metadata = FirstOperandName;
-
-  writeOperandWithCast(I.getOperand(0), I, args);
+  writeOperandWithCast(I.getOperand(0), I);
 
   // Comparison operator
   switch (I.getPredicate()) {
@@ -5544,11 +5290,7 @@ void CWriter::visitICmpInst(ICmpInst &I) {
     errorWithMessage("invalid icmp predicate");
   }
 
-  args.metadata = "";
-  if (SecondOperandName != "")
-    args.metadata = SecondOperandName;
-
-  writeOperandWithCast(I.getOperand(1), I, args);
+  writeOperandWithCast(I.getOperand(1), I);
   if (NeedsClosingParens)
     Out << "))";
 }
@@ -6672,8 +6414,9 @@ void CWriter::visitInlineAsm(CallInst &CI) {
 }
 
 void CWriter::visitAllocaInst(AllocaInst &I) {
+  llvm::errs() << "[visitAllocaInst] called for instruction: " << I << "\n";
+  // Out << I.getName();
   CurInstr = &I;
-
   headerUseBuiltinAlloca();
   Out << '(';
   printTypeName(Out, I.getType());
@@ -6809,12 +6552,6 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
 
 void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
                                 bool IsVolatile, unsigned Alignment /*bytes*/) {
-
-  // Convert Operand to string
-  std::string operandStr;
-  llvm::raw_string_ostream operandStream(operandStr);
-  Operand->print(operandStream);
-  operandStream.flush();
   auto ActualType = tryGetTypeOfAddressExposedValue(Operand);
   if (ActualType.has_value() && !IsVolatile) {
     if (ActualType.value() != OperandType) {
@@ -6822,13 +6559,8 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
       printTypeName(Out, OperandType, false);
       Out << "*)&";
     }
-    // // Convert Operand to string
-    // std::string operandStr;
-    // llvm::raw_string_ostream operandStream(operandStr);
-    // Operand->print(operandStream);
-    // operandStream.flush();
-    // std::cout << "Operand: " << operandStr << "\n";
-    writeOperandInternal(Operand);
+    Out << baseNameFromIRName(Operand->getName());
+    // writeOperandInternal(Operand);
     if (ActualType.value() != OperandType) {
       Out << ")";
     }
@@ -6853,7 +6585,8 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
     printTypeName(Out, OperandType, false);
     Out << "*)";
   }
-  writeOperand(Operand);
+  Out << baseNameFromIRName(Operand->getName());
+  // writeOperand(Operand);
 
   if (IsUnaligned) {
     Out << ")";
@@ -6861,12 +6594,16 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
 }
 
 void CWriter::visitLoadInst(LoadInst &I) {
-  CurInstr = &I;
-  writeMemoryAccess(I.getOperand(0), I.getType(), I.isVolatile(),
-                    I.getAlign().value());
+  llvm::errs() << "[visitLoadInst] called for instruction: " << I << "\n";
+  Out << I.getPointerOperand()->getName();
+  return;
+  // CurInstr = &I;
+  // writeMemoryAccess(I.getOperand(0), I.getType(), I.isVolatile(),
+  //                   I.getAlign().value());
 }
 
 void CWriter::visitStoreInst(StoreInst &I) {
+  llvm::errs() << "[visitStoreInst] called for instruction: " << I << "\n";
   CurInstr = &I;
 
   writeMemoryAccess(I.getPointerOperand(), I.getOperand(0)->getType(),
