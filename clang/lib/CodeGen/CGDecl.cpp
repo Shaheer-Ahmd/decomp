@@ -1574,19 +1574,27 @@ CodeGenFunction::EmitAutoVarAlloca(const VarDecl &D) {
           llvm::LLVMContext &Ctx = getLLVMContext();
 
           // 🔹 Construct metadata: "VariableName : DataType : SSA_Version"
-          static std::map<std::string, int> VariableVersionTracker;
+          // static std::map<std::string, int> VariableVersionTracker;
           std::string VarName = D.getNameAsString();
           std::string VarType = D.getType().getAsString();
-          int Version = VariableVersionTracker[VarName]++;
-          std::string SSAInfo = VarName + " : " + VarType + " : SSA_" + std::to_string(Version);
+          // int Version = VariableVersionTracker[VarName]++;
+          // std::string SSAInfo = VarName + " : " + VarType + " : SSA_" + std::to_string(Version);
 
-          // 🔹 Create LLVM metadata node
-          llvm::MDNode *SSAMetadata = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, SSAInfo));
+          // // 🔹 Create LLVM metadata node
+          // llvm::MDNode *SSAMetadata = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, SSAInfo));
 
-          // 🔹 Attach metadata to the `alloca` instruction
-          if (llvm::Instruction *I = llvm::dyn_cast<llvm::Instruction>(Var)) {
-              I->setMetadata("ssa_info", SSAMetadata);
-          }
+          // // 🔹 Attach metadata to the `alloca` instruction
+          // if (llvm::Instruction *I = llvm::dyn_cast<llvm::Instruction>(Var)) {
+          //     I->setMetadata("ssa_info", SSAMetadata);
+          // }
+
+          // Set global metadata VarName:VarType mapping
+          llvm::NamedMDNode *GlobalSSAMetadata = CGM.getModule().getOrInsertNamedMetadata("VarNameToTypeMapping");
+          llvm::MDNode *GlobalNode = llvm::MDNode::get(Ctx, {
+              llvm::MDString::get(Ctx, VarName),
+              llvm::MDString::get(Ctx, VarType)
+          });
+          GlobalSSAMetadata->addOperand(GlobalNode);
       }
 
 

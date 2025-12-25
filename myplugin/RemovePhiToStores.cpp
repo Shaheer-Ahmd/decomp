@@ -61,6 +61,19 @@ static BasicBlock *findFirstNonSkippableFirstPredAncestor(BasicBlock *Start) {
   return nullptr; // too deep
 }
 
+static std::string baseNameFromIRName(llvm::StringRef N) {
+  // Examples:
+  //   x.0.slot  -> x
+  //   x.0.load  -> x
+  //   x.addr    -> x
+  //   x.12      -> x
+  if (N.empty()) return "";
+
+  // Keep everything before the first '.'
+  auto Base = N.split('.').first;
+  return Base.str();
+}
+
 struct RemovePhiToStoresPass : public PassInfoMixin<RemovePhiToStoresPass> {
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
     bool Changed = false;
@@ -79,7 +92,8 @@ struct RemovePhiToStoresPass : public PassInfoMixin<RemovePhiToStoresPass> {
           break;
       }
     }
-
+    StringMap<AllocaInst *> SlotByBase;
+    IRBuilder<> EntryB(AllocaIP);
     for (PHINode *PN : Phis) {
       BasicBlock *PhiBB = PN->getParent();
 
@@ -93,9 +107,13 @@ struct RemovePhiToStoresPass : public PassInfoMixin<RemovePhiToStoresPass> {
       Type *Ty = PN->getType();
 
       // (A) alloca in entry
-      IRBuilder<> EntryB(AllocaIP);
-      AllocaInst *Slot =
-          EntryB.CreateAlloca(Ty, nullptr, PN->getName() + ".slot");
+      AllocaInst *Slot;
+      if (auto It = SlotByBase.find(baseNameFromIRName(PN->getName())); It != SlotByBase.end()) {
+        Slot = It->second;
+      } else {
+        Slot = EntryB.CreateAlloca(Ty, nullptr, baseNameFromIRName(PN->getName()));
+        SlotByBase[baseNameFromIRName(PN->getName())] = Slot;
+      }
 
       // (B) Insert stores in first non land/lor/crit_edge ancestor on
       // first-pred chain
@@ -114,6 +132,11 @@ struct RemovePhiToStoresPass : public PassInfoMixin<RemovePhiToStoresPass> {
             InsertBB = Ancestor;
           // If no ancestor found, fall back to IncomingBB (or you could skip
           // store)
+        }
+        if (baseNameFromIRName(IncomingV->getName()) ==
+            baseNameFromIRName(PN->getName())) {
+          // Avoid self-copy store
+          continue;
         }
 
         Instruction *Term = InsertBB->getTerminator();

@@ -1,1 +1,1 @@
-cd .../myplugin/build/ && ninja && cd -
+cd ../myplugin/build/ && ninja && cd -

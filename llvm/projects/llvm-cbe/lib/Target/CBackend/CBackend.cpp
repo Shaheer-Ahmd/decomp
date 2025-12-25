@@ -4210,6 +4210,35 @@ bool CWriter::canDeclareLocalLate(Instruction &I) {
   return true;
 }
 
+static StringRef mdStringToRef(const Metadata *MD) {
+  if (!MD)
+    return {};
+  if (auto *S = dyn_cast<MDString>(MD))
+    return S->getString();
+  return {};
+}
+
+// Returns empty StringRef if not found / malformed.
+static StringRef getTypeForVarNameFromMD(const Module &M, StringRef VarName) {
+  NamedMDNode *NMD = M.getNamedMetadata("VarNameToTypeMapping");
+  if (!NMD)
+    return {};
+
+  for (unsigned i = 0; i < NMD->getNumOperands(); ++i) {
+    MDNode *Entry = NMD->getOperand(i);
+    if (!Entry || Entry->getNumOperands() < 2)
+      continue;
+
+    StringRef Name = mdStringToRef(Entry->getOperand(0).get());
+    if (Name != VarName)
+      continue;
+
+    return mdStringToRef(Entry->getOperand(1).get());
+  }
+
+  return {};
+}
+
 void CWriter::printFunction(Function &F) {
   BlockNameToBlockPtrMap.clear();
   unsigned tmpId = 0;
@@ -4331,7 +4360,14 @@ void CWriter::printFunction(Function &F) {
       }
       bool metadata_extracted = false;
       // ssa_info
-      printTypeNameForAddressableValue(Out, AI->getAllocatedType(), false);
+      // search for varname in the global VarNameToTypeMapping metadata
+      StringRef varNameRef = getTypeForVarNameFromMD(*TheModule, GetValueName(AI));
+      if (!varNameRef.empty()) {
+        std::string varTypeStr = varNameRef.str();
+        Out << varTypeStr;
+      } else {
+        printTypeNameForAddressableValue(Out, AI->getAllocatedType(), false);
+      }
 
       Out << ' ' << GetValueName(AI);
       if (IsOveraligned) {
@@ -5036,7 +5072,7 @@ void CWriter::visitBranchInst(BranchInst &I,
     emitReturn(NBI->CCReturnInfo);
     return;
   default:
-    llvm::errs() << "[visitBranchInst] falling back to basic impl\n";
+    llvm::errs() << "[visitBranchInst] Ignoring\n";
     return;
   }
 }
