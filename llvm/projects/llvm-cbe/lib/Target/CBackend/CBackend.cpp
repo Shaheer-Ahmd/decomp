@@ -2131,10 +2131,7 @@ void CWriter::writeInstComputationInline(Instruction &I) {
 
 void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
                                    writeOperandCustomArgs customArgs) {
-
   llvm::errs() << "[writeOperandInternal] " << *Operand;
-
-
   if (Instruction *I = dyn_cast<Instruction>(Operand)) {
     // Should we inline this instruction to build a tree?
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
@@ -2145,25 +2142,23 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
       if (customArgs.wrapInParens)
         Out << ')';
       return;
+    } else {
+      llvm::errs() << " was a non-inlinable instruction: isInlinableInst="
+                   << isInlinableInst(*I)
+                   << ", isDirectAlloca=" << isDirectAlloca(I) << "\n";
     }
 
-    // if (isa<SelectInst>(Operand)) {
-    //   llvm::errs() << " was a select instruction\n";
-    //   writeInstComputationInline(*I);
-    //   return;
-    // }
-
-    // if (isa<CallInst>(Operand)) {
-    //   llvm::errs() << " was a call instruction\n";
-    //   writeInstComputationInline(*I);
-    //   return;
-    // }
-    // llvm::errs() << "[writeOperandInternal] Value is not an instruction\n";
-    // writeInstComputationInline(*I);
-    // return;
+    if (isa<LoadInst>(Operand)) {
+      llvm::errs() << " was a load instruction\n";
+      writeInstComputationInline(*I);
+      return;
+    }
   }
 
   Constant *CPV = dyn_cast<Constant>(Operand);
+  if (CPV) {
+    llvm::errs() << " was a constant\n";
+  }
   if (CPV && !isa<GlobalValue>(CPV)) {
     llvm::errs() << "not global CPV\n";
     printConstant(CPV, Context);
