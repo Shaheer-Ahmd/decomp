@@ -2131,93 +2131,114 @@ void CWriter::writeInstComputationInline(Instruction &I) {
 
 void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
                                    writeOperandCustomArgs customArgs) {
-  llvm::errs() << "[writeOperandInternal] " << *Operand;
   
   if (Instruction *I = dyn_cast<Instruction>(Operand)) {
-    // CRITICAL FIX: Check if this is a GEP instruction that accesses a struct field
-    // These should ALWAYS be inlined to produce p1.field notation
     if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
-      llvm::errs() << " is a GEP instruction - checking for struct field access\n";
-      llvm::errs() << "  GEP has " << GEP->getNumOperands() - 1 << " indices\n";
-      llvm::errs() << "  GEP hasOneUse: " << GEP->hasOneUse() << "\n";
-      
-      // Check if this GEP accesses a struct field
       gep_type_iterator gi = gep_type_begin(GEP);
       gep_type_iterator ge = gep_type_end(GEP);
       
       bool isStructFieldAccess = false;
       if (gi != ge) {
         Value *firstIdx = gi.getOperand();
-        llvm::errs() << "  First index: ";
-        firstIdx->print(llvm::errs());
-        llvm::errs() << "\n";
         ++gi;
         if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero() &&
             gi != ge && gi.isStruct()) {
-          Value *structIdx = gi.getOperand();
-          llvm::errs() << "  Second index (struct field): ";
-          structIdx->print(llvm::errs());
-          llvm::errs() << "\n";
-          llvm::errs() << "  Struct type: ";
-          gi.getStructType()->print(llvm::errs());
-          llvm::errs() << "\n";
-          
           isStructFieldAccess = true;
-          llvm::errs() << " -> IS a struct field access, FORCING inline\n";
         }
       }
       
       if (isStructFieldAccess) {
-        // Inline this GEP to produce p1.field notation
-        // DON'T wrap struct field access in parentheses - it's an lvalue, not an expression
-        llvm::errs() << " -> Calling writeInstComputationInline for struct field GEP\n";
-        // Removed: if (customArgs.wrapInParens) Out << '(';
         writeInstComputationInline(*I);
-        // Removed: if (customArgs.wrapInParens) Out << ')';
-        llvm::errs() << " -> Done inlining struct field GEP\n";
         return;
-      } else {
-        llvm::errs() << " -> NOT a struct field access, checking normal inlining\n";
       }
     }
     
-    // Should we inline this instruction to build a tree?
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
-      llvm::errs() << " was an inlinable instruction\n";
       if (customArgs.wrapInParens)
         Out << '(';
       writeInstComputationInline(*I);
       if (customArgs.wrapInParens)
         Out << ')';
       return;
-    } else {
-      llvm::errs() << " was a non-inlinable instruction: isInlinableInst="
-                   << isInlinableInst(*I)
-                   << ", isDirectAlloca=" << isDirectAlloca(I) << "\n";
     }
 
     if (isa<LoadInst>(Operand)) {
-      llvm::errs() << " was a load instruction\n";
       writeInstComputationInline(*I);
       return;
     }
   }
 
   Constant *CPV = dyn_cast<Constant>(Operand);
-  if (CPV) {
-    llvm::errs() << " was a constant\n";
-  }
+  
   if (CPV && !isa<GlobalValue>(CPV)) {
-    llvm::errs() << "not global CPV\n";
     printConstant(CPV, Context);
     return;
-  } else {
-    llvm::errs() << " get value name\n";
+  }
+  
+  if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Operand)) {
+    Type *varType = GV->getValueType();
+    
+    if (ArrayType *AT = dyn_cast<ArrayType>(varType)) {
+      Type *elemType = AT->getElementType();
+      if (StructType *ST = dyn_cast<StructType>(elemType)) {
+        if (ST->getNumElements() > 0) {
+          Type *firstFieldType = ST->getElementType(0);
+          if (firstFieldType->isArrayTy()) {
+            std::string fieldName = getFieldNameFromMetadata(ST, 0);
+            if (!fieldName.empty()) {
+              Out << GV->getName().str() << "[0]." << fieldName;
+              return;
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Operand)) {
+    if (CE->getOpcode() == Instruction::GetElementPtr) {
+      GEPOperator *GEPOp = cast<GEPOperator>(CE);
+      Type *sourceType = GEPOp->getSourceElementType();
+      
+      if (sourceType->isArrayTy() && CE->getNumOperands() >= 3) {
+        Value *base = CE->getOperand(0);
+        Value *firstIdx = CE->getOperand(1);
+        Value *secondIdx = CE->getOperand(2);
+        
+        if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
+          Type *elemType = cast<ArrayType>(sourceType)->getElementType();
+          
+          if (StructType *ST = dyn_cast<StructType>(elemType)) {
+            if (ST->getNumElements() > 0) {
+              Type *firstFieldType = ST->getElementType(0);
+              if (firstFieldType->isArrayTy()) {
+                std::string fieldName = getFieldNameFromMetadata(ST, 0);
+                if (!fieldName.empty()) {
+                  if (GlobalVariable *GV = dyn_cast<GlobalVariable>(base)) {
+                    Out << GV->getName().str();
+                  } else {
+                    writeOperand(base);
+                  }
+                  Out << "[";
+                  writeOperand(secondIdx);
+                  Out << "]." << fieldName;
+                  return;
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      printConstant(CPV, Context);
+      return;
+    }
+  }
+  
+  if (CPV) {
     Out << GetValueName(Operand);
     return;
   }
-
-  llvm::errs() << " this shoudn't be printed\n";
 }
 
 static BasicBlock *SearchBasicBlockByLabel(Instruction &I, std::string key) {
@@ -6567,44 +6588,22 @@ std::string CWriter::getFieldNameFromMetadata(const StructType *ST, unsigned Fie
 void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
                                  gep_type_iterator I, gep_type_iterator E,
                                  std::optional<Type *> SourceType) {
-  // DEBUG: Entry point
-  llvm::errs() << "\n=== DEBUG printGEPExpression START ===\n";
-  llvm::errs() << "Ptr: ";
-  Ptr->print(llvm::errs());
-  llvm::errs() << "\n";
-  llvm::errs() << "Ptr type: " << Ptr->getType()->getTypeID() << "\n";
-  llvm::errs() << "NumOperands: " << NumOperands << "\n";
-  llvm::errs() << "I == E: " << (I == E) << "\n";
-  
   if (I == E) {
-    llvm::errs() << "DEBUG: No indices, printing pointer directly\n";
     writeOperand(Ptr);
-    llvm::errs() << "=== DEBUG printGEPExpression END (no indices) ===\n\n";
     return;
   }
 
-  // Helper to print base.field or base->field for a struct field
-    std::function<void(Value*, StructType*, const std::string&)> emitBaseDotOrArrow = 
+  std::function<void(Value*, StructType*, const std::string&)> emitBaseDotOrArrow = 
     [&](Value *BasePtr, StructType *ST, const std::string &FieldName) {
-    llvm::errs() << "DEBUG: emitBaseDotOrArrow called\n";
-    llvm::errs() << "  BasePtr: ";
-    BasePtr->print(llvm::errs());
-    llvm::errs() << "\n";
-    llvm::errs() << "  FieldName: " << FieldName << "\n";
     
     if (AllocaInst *AI = dyn_cast<AllocaInst>(BasePtr)) {
-      llvm::errs() << "  DEBUG: BasePtr is AllocaInst\n";
-      
       if (AI->getAllocatedType()->isStructTy() && !AI->getName().empty()) {
-        llvm::errs() << "  DEBUG: Using name.field format\n";
         Out << AI->getName().str() << "." << FieldName;
         return;
       }
     }
 
     if (GetElementPtrInst *BaseGEP = dyn_cast<GetElementPtrInst>(BasePtr)) {
-      llvm::errs() << "  DEBUG: BasePtr is a GEP instruction\n";
-      
       gep_type_iterator bgi = gep_type_begin(BaseGEP);
       gep_type_iterator bge = gep_type_end(BaseGEP);
       
@@ -6619,15 +6618,10 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
             StructType *BaseST = bgi.getStructType();
             std::string BaseFieldName = getFieldNameFromMetadata(BaseST, BaseFieldIdx);
             
-            llvm::errs() << "  DEBUG: BasePtr GEP accesses struct field '" << BaseFieldName << "'\n";
-            
             if (!BaseFieldName.empty()) {
               Value *BaseBase = BaseGEP->getPointerOperand();
-              llvm::errs() << "  DEBUG: Recursively expanding base\n";
-              
               emitBaseDotOrArrow(BaseBase, BaseST, BaseFieldName);
               Out << "." << FieldName;
-              llvm::errs() << "  DEBUG: Nested struct access complete\n";
               return;
             }
           }
@@ -6637,8 +6631,6 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
     
     if (ConstantExpr *CE = dyn_cast<ConstantExpr>(BasePtr)) {
       if (CE->getOpcode() == Instruction::GetElementPtr) {
-        llvm::errs() << "  DEBUG: BasePtr is a constant GEP expression\n";
-        
         GEPOperator *GEPOp = cast<GEPOperator>(CE);
         Type *sourceType = GEPOp->getSourceElementType();
         
@@ -6650,8 +6642,6 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
           if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
             
             if (sourceType->isArrayTy()) {
-              llvm::errs() << "  DEBUG: Constant GEP is array indexing\n";
-              
               if (GlobalVariable *GV = dyn_cast<GlobalVariable>(base)) {
                 Out << GV->getName().str();
               } else {
@@ -6663,16 +6653,11 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
               Out << "]." << FieldName;
               return;
             } else if (sourceType->isStructTy() && isa<ConstantInt>(secondIdx)) {
-              llvm::errs() << "  DEBUG: Constant GEP accesses struct field\n";
-              
               unsigned structFieldIdx = cast<ConstantInt>(secondIdx)->getZExtValue();
               StructType *innerST = cast<StructType>(sourceType);
               std::string innerFieldName = getFieldNameFromMetadata(innerST, structFieldIdx);
               
-              llvm::errs() << "  DEBUG: Inner field name: '" << innerFieldName << "'\n";
-              
               if (!innerFieldName.empty()) {
-                // Recursively expand the base with the inner field
                 emitBaseDotOrArrow(base, innerST, innerFieldName);
                 Out << "." << FieldName;
                 return;
@@ -6685,25 +6670,19 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
 
     if (GlobalVariable *GV = dyn_cast<GlobalVariable>(BasePtr)) {
       Type *varType = GV->getValueType();
-      llvm::errs() << "  DEBUG: BasePtr is GlobalVariable\n";
       
       if (varType->isArrayTy()) {
-        llvm::errs() << "  DEBUG: Global array, using array[0].field notation\n";
         Out << GV->getName().str() << "[0]." << FieldName;
         return;
       }
     }
 
-    // Fallback for other pointer types
     if (BasePtr->getType()->isPointerTy()) {
-      llvm::errs() << "  DEBUG: BasePtr type is pointer, using base->field format\n";
       writeOperand(BasePtr);
       Out << "->" << FieldName;
       return;
     }
 
-    // Final fallback
-    llvm::errs() << "  DEBUG: Using fallback cast format\n";
     Out << "((";
     printTypeName(Out, ST);
     Out << "*)";
@@ -6711,313 +6690,263 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
     Out << ")->" << FieldName;
   };
 
-  llvm::errs() << "DEBUG: Checking if Ptr is GetElementPtrInst\n";
   if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
-    llvm::errs() << "DEBUG: PRIMARY PATH - Ptr IS a GEP instruction\n";
-    // Walk GEP indices: need first index == 0 and second index a struct field index
     gep_type_iterator gi = gep_type_begin(GEP);
     gep_type_iterator ge = gep_type_end(GEP);
 
-    llvm::errs() << "  GEP pointer operand: ";
-    GEP->getPointerOperand()->print(llvm::errs());
-    llvm::errs() << "\n";
-    llvm::errs() << "  GEP has " << GEP->getNumOperands() - 1 << " indices\n";
-
     if (gi != ge) {
       Value *firstIdx = gi.getOperand();
-      llvm::errs() << "  First index: ";
-      firstIdx->print(llvm::errs());
-      llvm::errs() << "\n";
-      llvm::errs() << "  First index is ConstantInt: " << isa<ConstantInt>(firstIdx) << "\n";
-      if (isa<ConstantInt>(firstIdx)) {
-        llvm::errs() << "  First index is zero: " << cast<ConstantInt>(firstIdx)->isZero() << "\n";
-      }
-      
       ++gi;
-      llvm::errs() << "  After advancing, gi != ge: " << (gi != ge) << "\n";
       
       if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero() &&
           gi != ge && gi.isStruct()) {
-        llvm::errs() << "  DEBUG: Found struct field access pattern\n";
-        // struct index present
         Value *structIdxV = gi.getOperand();
-        llvm::errs() << "  Struct index value: ";
-        structIdxV->print(llvm::errs());
-        llvm::errs() << "\n";
-        llvm::errs() << "  Struct index is ConstantInt: " << isa<ConstantInt>(structIdxV) << "\n";
         
         if (isa<ConstantInt>(structIdxV)) {
           unsigned FieldIdx = (unsigned)cast<ConstantInt>(structIdxV)->getZExtValue();
           StructType *ST = gi.getStructType();
-          llvm::errs() << "  Field index: " << FieldIdx << "\n";
-          llvm::errs() << "  Struct type: ";
-          ST->print(llvm::errs());
-          llvm::errs() << "\n";
-          
           std::string FieldName = getFieldNameFromMetadata(ST, FieldIdx);
-          llvm::errs() << "  Field name from metadata: '" << FieldName << "'\n";
 
           if (!FieldName.empty()) {
-          Value *BasePtr = GEP->getPointerOperand();
-          llvm::errs() << "  DEBUG: Emitting base.field or base->field\n";
-          emitBaseDotOrArrow(BasePtr, ST, FieldName);
-
-          ++gi;
-          llvm::errs() << "  After advancing past struct index, gi == ge: " << (gi == ge) << "\n";
-          llvm::errs() << "  Checking ORIGINAL indices: I == E: " << (I == E) << "\n";
+            Value *BasePtr = GEP->getPointerOperand();
+            emitBaseDotOrArrow(BasePtr, ST, FieldName);
+            ++gi;
           
-          // If the ORIGINAL call has indices (I != E), we need to handle them
-          if (I != E) {
-            llvm::errs() << "  DEBUG: Original call HAS indices, processing them\n";
-            gep_type_iterator localI = I;
-            Value *firstIdx = localI.getOperand();
-            if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
-              ++localI;
-              if (localI != E && localI.isStruct()) {
-                Value *structIdxV = localI.getOperand();
-                if (isa<ConstantInt>(structIdxV)) {
-                  unsigned FieldIdx = (unsigned)cast<ConstantInt>(structIdxV)->getZExtValue();
-                  StructType *ST2 = localI.getStructType();
-                  std::string FieldName2 = getFieldNameFromMetadata(ST2, FieldIdx);
+            if (I != E) {
+              gep_type_iterator localI = I;
+              Value *firstIdx = localI.getOperand();
+              if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
+                ++localI;
+                if (localI != E && localI.isStruct()) {
+                  Value *structIdxV = localI.getOperand();
+                  if (isa<ConstantInt>(structIdxV)) {
+                    unsigned FieldIdx = (unsigned)cast<ConstantInt>(structIdxV)->getZExtValue();
+                    StructType *ST2 = localI.getStructType();
+                    std::string FieldName2 = getFieldNameFromMetadata(ST2, FieldIdx);
                   
-                  llvm::errs() << "  DEBUG: Original indices access field '" << FieldName2 << "'\n";
-                  
-                  if (!FieldName2.empty()) {
-                    Out << "." << FieldName2;
-                    ++localI;
+                    if (!FieldName2.empty()) {
+                      Out << "." << FieldName2;
+                      ++localI;
                     
-                    if (localI == E) {
-                      llvm::errs() << "  DEBUG: No more original indices\n";
+                      if (localI == E) return;
+                    
+                      bool allZeros = true;
+                      for (gep_type_iterator rem = localI; rem != E; ++rem) {
+                        Value *idx = rem.getOperand();
+                        if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
+                          allZeros = false;
+                          break;
+                        }
+                      }
+                      if (allZeros) return;
+                    
+                      for (; localI != E; ++localI) {
+                        Value *Opnd = localI.getOperand();
+                        Out << "[";
+                        writeOperand(Opnd);
+                        Out << "]";
+                      }
                       return;
                     }
-                    
-                    bool allZeros = true;
-                    for (gep_type_iterator rem = localI; rem != E; ++rem) {
-                      Value *idx = rem.getOperand();
-                      if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
-                        allZeros = false;
-                        break;
-                      }
-                    }
-                    if (allZeros) return;
-                    
-                    for (; localI != E; ++localI) {
-                      Value *Opnd = localI.getOperand();
-                      Out << "[";
-                      writeOperand(Opnd);
-                      Out << "]";
-                    }
-                    return;
                   }
                 }
               }
             }
-          }
           
-          if (gi == ge) {
-            llvm::errs() << "  DEBUG: No remaining indices in base GEP, done\n";
-            llvm::errs() << "=== DEBUG printGEPExpression END (primary, no remaining) ===\n\n";
-            return;
-          }
+            if (gi == ge) return;
 
-          llvm::errs() << "  DEBUG: Checking remaining indices in base GEP\n";
-          bool allZeros = true;
-          int remainingCount = 0;
-          for (gep_type_iterator rem = gi; rem != ge; ++rem) {
-            Value *idx = rem.getOperand();
-            remainingCount++;
-            llvm::errs() << "    Remaining index " << remainingCount << ": ";
-            idx->print(llvm::errs());
-            llvm::errs() << "\n";
-            if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
-              allZeros = false;
-              llvm::errs() << "    This index is NOT zero\n";
+            bool allZeros = true;
+            for (gep_type_iterator rem = gi; rem != ge; ++rem) {
+              Value *idx = rem.getOperand();
+              if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
+                allZeros = false;
+                break;
+              }
             }
-          }
-          llvm::errs() << "  All remaining zeros: " << allZeros << "\n";
 
-          if (allZeros) {
-            llvm::errs() << "  DEBUG: Array decay, done\n";
-            llvm::errs() << "=== DEBUG printGEPExpression END (primary, array decay) ===\n\n";
+            if (allZeros) return;
+
+            for (; gi != ge; ++gi) {
+              Value *Opnd = gi.getOperand();
+              Out << "[";
+              writeOperand(Opnd);
+              Out << "]";
+            }
             return;
-          }
-
-          llvm::errs() << "  DEBUG: Printing explicit remaining indices from base GEP\n";
-          for (; gi != ge; ++gi) {
-            Value *Opnd = gi.getOperand();
-            Out << "[";
-            writeOperand(Opnd);
-            Out << "]";
-          }
-          llvm::errs() << "=== DEBUG printGEPExpression END (primary, with indices) ===\n\n";
-          return;
-        } else {
-            llvm::errs() << "  DEBUG: Field name is empty, falling through\n";
           }
         }
       }
     }
-  } else {
-    llvm::errs() << "DEBUG: Ptr is NOT a GEP instruction\n";
   }
 
-  llvm::errs() << "DEBUG: SECONDARY PATH - Checking if indices describe struct field\n";
   {
     gep_type_iterator localI = I;
     Value *firstIdx = localI.getOperand();
-    llvm::errs() << "  First index: ";
-    firstIdx->print(llvm::errs());
-    llvm::errs() << "\n";
-    llvm::errs() << "  First index is ConstantInt: " << isa<ConstantInt>(firstIdx) << "\n";
-    if (isa<ConstantInt>(firstIdx)) {
-      llvm::errs() << "  First index is zero: " << cast<ConstantInt>(firstIdx)->isZero() << "\n";
-    }
     
     if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
       ++localI;
-      llvm::errs() << "  After advancing, localI != E: " << (localI != E) << "\n";
-      if (localI != E) {
-        llvm::errs() << "  localI.isStruct(): " << localI.isStruct() << "\n";
-      }
       
       if (localI != E && localI.isStruct()) {
-        llvm::errs() << "  DEBUG: Found struct pattern in indices\n";
         Value *structIdxV = localI.getOperand();
-        llvm::errs() << "  Struct index value: ";
-        structIdxV->print(llvm::errs());
-        llvm::errs() << "\n";
-        llvm::errs() << "  Struct index is ConstantInt: " << isa<ConstantInt>(structIdxV) << "\n";
         
         if (isa<ConstantInt>(structIdxV)) {
           unsigned FieldIdx = (unsigned)cast<ConstantInt>(structIdxV)->getZExtValue();
           StructType *ST = localI.getStructType();
-          llvm::errs() << "  Field index: " << FieldIdx << "\n";
-          llvm::errs() << "  Struct type: ";
-          ST->print(llvm::errs());
-          llvm::errs() << "\n";
-          
           std::string FieldName = getFieldNameFromMetadata(ST, FieldIdx);
-          llvm::errs() << "  Field name from metadata: '" << FieldName << "'\n";
 
           if (!FieldName.empty()) {
-            llvm::errs() << "  DEBUG: Emitting base.field or base->field for Ptr\n";
             emitBaseDotOrArrow(Ptr, ST, FieldName);
 
-            ++localI;
-            llvm::errs() << "  After advancing past struct index, localI == E: " << (localI == E) << "\n";
-            
-            if (localI == E) {
-              llvm::errs() << "  DEBUG: No remaining indices, done\n";
-              llvm::errs() << "=== DEBUG printGEPExpression END (secondary, no remaining) ===\n\n";
-              return;
-            }
-            
-            llvm::errs() << "  DEBUG: Checking remaining indices\n";
-            bool allZeros = true;
-            int remainingCount = 0;
-            for (gep_type_iterator rem = localI; rem != E; ++rem) {
-              Value *idx = rem.getOperand();
-              remainingCount++;
-              llvm::errs() << "    Remaining index " << remainingCount << ": ";
-              idx->print(llvm::errs());
-              llvm::errs() << "\n";
-              if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
-                allZeros = false;
-                llvm::errs() << "    This index is NOT zero\n";
+            Type *accessedFieldType = ST->getElementType(FieldIdx);
+            if (accessedFieldType->isStructTy()) {
+              StructType *fieldST = cast<StructType>(accessedFieldType);
+              if (fieldST->getNumElements() > 0) {
+                Type *firstElemType = fieldST->getElementType(0);
+                if (firstElemType->isArrayTy()) {
+                  std::string firstFieldName = getFieldNameFromMetadata(fieldST, 0);
+                  if (!firstFieldName.empty()) {
+                    Out << "." << firstFieldName;
+                  }
+                }
               }
             }
-            llvm::errs() << "  All remaining zeros: " << allZeros << "\n";
+
+            ++localI;
             
-            if (allZeros) {
-              llvm::errs() << "  DEBUG: Array decay, done\n";
-              llvm::errs() << "=== DEBUG printGEPExpression END (secondary, array decay) ===\n\n";
-              return;
+            if (localI == E) return;
+            
+            bool allZeros = true;
+            for (gep_type_iterator rem = localI; rem != E; ++rem) {
+              Value *idx = rem.getOperand();
+              if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
+                allZeros = false;
+                break;
+              }
             }
             
-            llvm::errs() << "  DEBUG: Printing explicit remaining indices\n";
+            if (allZeros) return;
+            
             for (; localI != E; ++localI) {
               Value *Opnd = localI.getOperand();
               Out << "[";
               writeOperand(Opnd);
               Out << "]";
             }
-            llvm::errs() << "=== DEBUG printGEPExpression END (secondary, with indices) ===\n\n";
             return;
-          } else {
-            llvm::errs() << "  DEBUG: Field name is empty, falling through\n";
           }
         }
       }
     }
   }
 
-  // FALLBACK: no struct pattern recognized. Use original behavior.
-  llvm::errs() << "DEBUG: FALLBACK PATH - Using original behavior\n";
   gep_type_iterator checkI = I;
   if (checkI != E) {
     Value *firstIdx = checkI.getOperand();
     if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
-      llvm::errs() << "  FALLBACK: First index is 0, checking for array pattern\n";
       ++checkI;
       if (checkI != E && !checkI.isStruct()) {
+        bool ptrIsSpecialGlobal = false;
+        if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Ptr)) {
+          Type *varType = GV->getValueType();
+          if (varType->isArrayTy()) {
+            Type *elemType = varType->getArrayElementType();
+            if (elemType->isStructTy()) {
+              StructType *ST = cast<StructType>(elemType);
+              Type *firstFieldType = ST->getElementType(0);
+              if (firstFieldType->isArrayTy()) {
+                std::string firstFieldName = getFieldNameFromMetadata(ST, 0);
+                if (!firstFieldName.empty()) {
+                  ptrIsSpecialGlobal = true;
+                  Out << GV->getName().str();
+                }
+              }
+            }
+          }
+        }
 
-        llvm::errs() << "  FALLBACK: Array indexing pattern detected\n";
-        writeOperandInternal(Ptr);
+        if (!ptrIsSpecialGlobal) {
+          if (AllocaInst *AI = dyn_cast<AllocaInst>(Ptr)) {
+            Out << AI->getName().str();
+          } else if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Ptr)) {
+            Out << GV->getName().str();
+          } else {
+            writeOperandInternal(Ptr);
+          }
+        }
         
         ++I;
         
         for (; I != E; ++I) {
           Value *Opnd = I.getOperand();
           Out << "[";
-          writeOperand(Opnd); 
+          
+          if (CastInst *CI = dyn_cast<CastInst>(Opnd)) {
+            if (CI->isIntegerCast()) {
+              writeOperand(CI->getOperand(0));
+            } else {
+              writeOperand(Opnd);
+            }
+          } else {
+            writeOperand(Opnd);
+          }
+          
           Out << "]";
         }
-        llvm::errs() << "=== DEBUG printGEPExpression END (fallback, array) ===\n\n";
+        
+        if (ptrIsSpecialGlobal && I == E) {
+          if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Ptr)) {
+            Type *varType = GV->getValueType();
+            if (varType->isArrayTy()) {
+              Type *elemType = varType->getArrayElementType();
+              if (elemType->isStructTy()) {
+                StructType *ST = cast<StructType>(elemType);
+                std::string firstFieldName = getFieldNameFromMetadata(ST, 0);
+                Out << "." << firstFieldName;
+              }
+            }
+          }
+        }
         return;
       }
     }
   }
 
-  llvm::errs() << "  FALLBACK: Not special array pattern, printing all indices\n";
   writeOperandInternal(Ptr);
   for (; I != E; ++I) {
     Value *Opnd = I.getOperand();
     Out << "[";
-    writeOperand(Opnd); 
+    
+    if (CastInst *CI = dyn_cast<CastInst>(Opnd)) {
+      if (CI->isIntegerCast()) {
+        writeOperand(CI->getOperand(0));
+      } else {
+        writeOperand(Opnd);
+      }
+    } else {
+      writeOperand(Opnd);
+    }
+    
     Out << "]";
   }
-  llvm::errs() << "=== DEBUG printGEPExpression END (fallback) ===\n\n";
 }
 
 
 void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
-                                bool IsVolatile, unsigned Alignment /*bytes*/) {
-  llvm::errs() << "[writeMemoryAccess] called for operand: " << *Operand << "\n";
-  llvm::errs() << "[writeMemoryAccess] OperandType: ";
-  OperandType->print(llvm::errs());
-  llvm::errs() << "\n";
-  
-  // CRITICAL FIX: Check for BOTH GEP instructions AND constant GEP expressions
-  // Constant GEPs are ConstantExpr, not GetElementPtrInst!
+                                bool IsVolatile, unsigned Alignment) {
   bool isGEP = false;
   GetElementPtrInst *GEP = nullptr;
   ConstantExpr *CE = nullptr;
   
   if ((GEP = dyn_cast<GetElementPtrInst>(Operand))) {
     isGEP = true;
-    llvm::errs() << "[writeMemoryAccess] Operand is a GEP INSTRUCTION\n";
   } else if ((CE = dyn_cast<ConstantExpr>(Operand)) && CE->getOpcode() == Instruction::GetElementPtr) {
     isGEP = true;
-    llvm::errs() << "[writeMemoryAccess] Operand is a CONSTANT GEP expression\n";
   }
   
   if (isGEP) {
-    // Check if this is a struct field access pattern
-    // For ConstantExpr, we need to examine it differently
     bool isStructFieldAccess = false;
     
     if (GEP) {
-      // Handle GEP instruction (we already have this code)
       gep_type_iterator gi = gep_type_begin(GEP);
       gep_type_iterator ge = gep_type_end(GEP);
       
@@ -7027,78 +6956,36 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
         if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero() &&
             gi != ge && gi.isStruct()) {
           isStructFieldAccess = true;
-          llvm::errs() << "[writeMemoryAccess] GEP instruction IS a struct field access\n";
         }
       }
     } else if (CE) {
-      // Handle constant GEP expression
-      llvm::errs() << "[writeMemoryAccess] Analyzing constant GEP...\n";
-      llvm::errs() << "[writeMemoryAccess] CE has " << CE->getNumOperands() << " operands\n";
-      
-      // For constant GEP: operand 0 is the base pointer, rest are indices
-      if (CE->getNumOperands() >= 3) { // Need at least base + 2 indices for struct field
-        Value *firstIdx = CE->getOperand(1); // First index
-        Value *secondIdx = CE->getOperand(2); // Second index (potential struct field)
-        
-        llvm::errs() << "[writeMemoryAccess] First index: ";
-        firstIdx->print(llvm::errs());
-        llvm::errs() << "\n";
-        llvm::errs() << "[writeMemoryAccess] Second index: ";
-        secondIdx->print(llvm::errs());
-        llvm::errs() << "\n";
+      if (CE->getNumOperands() >= 3) {
+        Value *firstIdx = CE->getOperand(1);
+        Value *secondIdx = CE->getOperand(2);
         
         if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
-          // First index is 0, check if we're indexing into a struct
-          // We need to get the source element type
-          Type *ptrType = CE->getOperand(0)->getType();
-          llvm::errs() << "[writeMemoryAccess] Base pointer type: ";
-          ptrType->print(llvm::errs());
-          llvm::errs() << "\n";
-          
-          // Get the source type from the GEP
           GEPOperator *GEPOp = cast<GEPOperator>(CE);
           Type *sourceType = GEPOp->getSourceElementType();
-          llvm::errs() << "[writeMemoryAccess] Source element type: ";
-          sourceType->print(llvm::errs());
-          llvm::errs() << "\n";
           
-          // Check if second index accesses a struct field
           if (sourceType->isStructTy() && isa<ConstantInt>(secondIdx)) {
             isStructFieldAccess = true;
-            llvm::errs() << "[writeMemoryAccess] Constant GEP IS a struct field access\n";
           }
         }
       }
     }
     
-    if (isStructFieldAccess) {
-      // For struct fields, just expand the GEP to p1.field notation
-      // No pointer dereference needed!
-      llvm::errs() << "[writeMemoryAccess] Using direct notation for struct field\n";
-      writeOperand(Operand);
-      llvm::errs() << "[writeMemoryAccess] Done (struct field)\n";
-      return;
-    } else {
-      llvm::errs() << "[writeMemoryAccess] GEP is NOT a struct field access, continuing with normal logic\n";
-    }
+    writeOperand(Operand);
+    return;
   }
   
-  // Original logic for non-struct-field cases
   auto ActualType = tryGetTypeOfAddressExposedValue(Operand);
   if (ActualType.has_value() && !IsVolatile) {
-    llvm::errs() << "[writeMemoryAccess] Has actual type and not volatile\n";
-    llvm::errs() << "[writeMemoryAccess] ActualType: ";
-    ActualType.value()->print(llvm::errs());
-    llvm::errs() << "\n";
-    llvm::errs() << "[writeMemoryAccess] Types match: " << (ActualType.value() == OperandType) << "\n";
-    
     if (ActualType.value() != OperandType) {
       Out << "*((";
       printTypeName(Out, OperandType, false);
       Out << "*)&";
     }
     
-    // For non-GEP cases
     Out << baseNameFromIRName(Operand->getName());
     
     if (ActualType.value() != OperandType) {
@@ -7107,12 +6994,7 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
     return;
   }
 
-  llvm::errs() << "[writeMemoryAccess] Using pointer dereference path\n";
-  llvm::errs() << "[writeMemoryAccess] ActualType.has_value(): " << ActualType.has_value() << "\n";
-  llvm::errs() << "[writeMemoryAccess] IsVolatile: " << IsVolatile << "\n";
-  
-  bool IsUnaligned =
-      Alignment && Alignment < TD->getABITypeAlign(OperandType).value();
+  bool IsUnaligned = Alignment && Alignment < TD->getABITypeAlign(OperandType).value();
 
   if (IsUnaligned) {
     headerUseUnalignedLoad();
@@ -7135,8 +7017,6 @@ void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
   if (IsUnaligned) {
     Out << ")";
   }
-  
-  llvm::errs() << "[writeMemoryAccess] Done\n";
 }
 
 
