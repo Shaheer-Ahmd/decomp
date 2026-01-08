@@ -216,6 +216,8 @@ struct NormalizedBranch {
 /// module to a C translation unit.
 class CWriter : public FunctionPass, public InstVisitor<CWriter> {
   llvm::StringMap<llvm::BasicBlock *> BlockNameToBlockPtrMap;
+  mutable DenseMap<const StructType *, SmallVector<std::string, 8>>
+      StructFieldNameCache;
   std::string _Out;
   std::string _OutHeaders;
   raw_string_ostream OutHeaders;
@@ -424,7 +426,9 @@ private:
   void emitSwitch(SwitchShape switchShape);
   void emitReturn(ReturnShape returnShape);
 
-  void writeOperandDeref(Value *Operand);
+  std::string getFieldNameFromMetadata(const StructType *ST, unsigned FieldIdx) const;
+
+      void writeOperandDeref(Value *Operand);
 
   void
   writeOperand(Value *Operand, enum OperandContext Context = ContextNormal,
