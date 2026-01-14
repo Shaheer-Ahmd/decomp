@@ -218,29 +218,20 @@ NormalizedBranch *CWriter::normalizeIfBranch(llvm::BranchInst &I) {
 
   // Must be conditional with two successors.
   if (!I.isConditional() || I.getNumSuccessors() != 2)
-    return Res;
+    llvm::errs() << "[normalizeIfBranch] not conditional or != 2 successors\n";
 
   // Identify blocks.
-  BasicBlock *ThenBB = I.getSuccessor(0);
-  BasicBlock *ElseBB = I.getSuccessor(1);
+  Res->IfInfo.ThenBB = I.getSuccessor(0);
+  Res->IfInfo.ElseBB = I.getSuccessor(1);
   llvm::MDString *IfContMDS = getMDString(I, llvm::mdk::ContBlockKey);
-  if (!IfContMDS)
-    return Res;
-  std::string JoinBBName = IfContMDS->getString().str();
-  BasicBlock *JoinBB = SearchBasicBlockByLabel(I, JoinBBName);
-  if (!JoinBB)
-    return Res;
+  if (IfContMDS)
+    Res->IfInfo.JoinBB = SearchBasicBlockByLabel(I, IfContMDS->getString().str());
 
-  // Fill in the IfShape.
   Res->Kind = NormalizedBranchKind::If;
   Res->IfInfo.Cond.IRValue = I.getCondition();
-  Res->IfInfo.ThenBB = ThenBB;
-  Res->IfInfo.ElseBB = ElseBB;
-  Res->IfInfo.JoinBB = JoinBB;
-
-  if (ElseBB != JoinBB) {
+  if (Res->IfInfo.JoinBB && Res->IfInfo.ElseBB != Res->IfInfo.JoinBB) {
     if (llvm::BranchInst *ElseBr =
-            dyn_cast<BranchInst>(ElseBB->getTerminator())) {
+            dyn_cast<BranchInst>(Res->IfInfo.ElseBB->getTerminator())) {
       if (ElseBr->getMetadata("else_if")) {
         Res->IfInfo.IsElseIf = true;
       }
@@ -296,6 +287,15 @@ NormalizedBranch *CWriter::normalizeBranch(llvm::BranchInst &I) {
   llvm::MDString *UserIntroducedGotoMDS = getMDString(I, "user_introduced");
   if (UserIntroducedGotoMDS) {
     Res->Kind = NormalizedBranchKind::UserIntroducedGoto;
+    return Res;
+  }
+
+  // find `.` in BB name
+  bool isCompilerIntroducedLabelName = I.getSuccessor(0)->getName().str().find('.') !=
+                                   std::string::npos; 
+  if (I.isUnconditional() && !isCompilerIntroducedLabelName) {
+    llvm::errs() << "[normalizeBranch] Unconditional jump to BB with name:" << I.getSuccessor(0)->getName().str() << "\n";
+    Res->Kind = NormalizedBranchKind::UnconditionalJump;
     return Res;
   }
 
@@ -2131,9 +2131,11 @@ void CWriter::writeInstComputationInline(Instruction &I) {
 
 void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
                                    writeOperandCustomArgs customArgs) {
-  
+  llvm::errs() << "writeOperandInternal called for: " << *Operand << "\n";
   if (Instruction *I = dyn_cast<Instruction>(Operand)) {
+    llvm::errs() << "Operand is an instruction\n";
     if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
+      llvm::errs() << "Operand is a GEP instruction\n";
       gep_type_iterator gi = gep_type_begin(GEP);
       gep_type_iterator ge = gep_type_end(GEP);
       
@@ -2152,7 +2154,7 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
         return;
       }
     }
-    
+   
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
       if (customArgs.wrapInParens)
         Out << '(';
@@ -2160,9 +2162,11 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
       if (customArgs.wrapInParens)
         Out << ')';
       return;
+    } else {
+      llvm::errs() << "[writeOperandInternal] Instruction is not inlinable\n";
     }
 
-    if (isa<LoadInst>(Operand)) {
+    if (isa<LoadInst>(Operand) || isa<CallInst>(Operand)) {
       writeInstComputationInline(*I);
       return;
     }
@@ -2171,9 +2175,10 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
   Constant *CPV = dyn_cast<Constant>(Operand);
   
   if (CPV && !isa<GlobalValue>(CPV)) {
+    llvm::errs() << "Operand is a non global constant value\n";
     printConstant(CPV, Context);
     return;
-  }
+  } 
   
   if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Operand)) {
     Type *varType = GV->getValueType();
@@ -2194,8 +2199,9 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
       }
     }
   }
-  
-  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Operand)) {
+
+  else if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Operand)) {
+    llvm::errs() << "Operand is a constant expression\n";
     if (CE->getOpcode() == Instruction::GetElementPtr) {
       GEPOperator *GEPOp = cast<GEPOperator>(CE);
       Type *sourceType = GEPOp->getSourceElementType();
@@ -2235,7 +2241,7 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
     }
   }
   
-  if (CPV) {
+  else {
     Out << GetValueName(Operand);
     return;
   }
@@ -2243,6 +2249,9 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
 
 static BasicBlock *SearchBasicBlockByLabel(Instruction &I, std::string key) {
   BasicBlock *ResultBB = nullptr;
+  if (key.empty())
+    return ResultBB;
+
   for (auto &BB : *I.getParent()->getParent()) {
     if (BB.getName() == key) {
       ResultBB = &BB;
@@ -4518,9 +4527,9 @@ void CWriter::printFunction(Function &F) {
         printLoop(L);
     } else {
       llvm::errs() << "[printFunction] printBB for " << labelName << "\n";
-      bool noLabel = true;
+      bool noLabel = false;
       if (isCompCond) {
-        noLabel = false;
+        noLabel = true;
       }
       printBasicBlock(&*BB, printBasicBlockCustomArgs(false, false, noLabel));
     }
@@ -4813,6 +4822,8 @@ void CWriter::printPHICopiesForSuccessor(BasicBlock *CurBlock,
 
 void CWriter::printBranchToBlock(BasicBlock *CurBB, BasicBlock *Succ,
                                  unsigned Indent) {
+  llvm::errs() << "[printBranchToBlock] from " << CurBB->getName().str()
+               << " to " << Succ->getName().str() << "\n";
   if (isGotoCodeNecessary(CurBB, Succ)) {
     Out << std::string(Indent, ' ') << "  goto ";
     writeOperand(Succ);
@@ -5064,30 +5075,41 @@ void CWriter::emitFor(ForShape forShape) {
 NormalizedBranch *CWriter::normalizeWhileBranch(llvm::BranchInst &I) {
   llvm::errs() << "[normalizeWhileBranch] called for " << I << "\n";
   NormalizedBranch *Res = new NormalizedBranch{};
+
+  llvm::MDString *CMDs = getMDString(I, llvm::mdk::ConditionBlockKey);
+  
+  if (CMDs)
   Res->WhileInfo.CondBB = SearchBasicBlockByLabel(
-      I, getMDString(I, llvm::mdk::ConditionBlockKey)->getString().str());
+        I, CMDs->getString().str());
+  
+  if (Res->WhileInfo.CondBB) {
+      BranchInst *CondBr =
+          dyn_cast<BranchInst>(Res->WhileInfo.CondBB->getTerminator());
+    
+      llvm::MDString *CCMDs =
+          getMDString(*CondBr, llvm::mdk::CompoundConditionTree);
+      if (!CCMDs) {
+        Res->WhileInfo.Cond.IRValue =
+            dyn_cast<BranchInst>(Res->WhileInfo.CondBB->getTerminator())
+                ->getCondition();
+      } else {
+        Res->WhileInfo.Cond.OverwriteCCTree =
+            CondBr->getMetadata(llvm::mdk::CompoundConditionTree);
+        Res->WhileInfo.Cond.OverwriteCCTreeInstruction = CondBr;
+      }
+    }
 
-  BranchInst *CondBr =
-      dyn_cast<BranchInst>(Res->WhileInfo.CondBB->getTerminator());
-
-  llvm::MDString *CCMDs =
-      getMDString(*CondBr, llvm::mdk::CompoundConditionTree);
-  if (!CCMDs) {
-    Res->WhileInfo.Cond.IRValue =
-        dyn_cast<BranchInst>(Res->WhileInfo.CondBB->getTerminator())
-            ->getCondition();
-  } else {
-    Res->WhileInfo.Cond.OverwriteCCTree =
-        CondBr->getMetadata(llvm::mdk::CompoundConditionTree);
-    Res->WhileInfo.Cond.OverwriteCCTreeInstruction = CondBr;
-  }
-
+  llvm::MDString *ContMDS = getMDString(I, llvm::mdk::ContBlockKey);
+  if (ContMDS)
   Res->WhileInfo.ExitBB = SearchBasicBlockByLabel(
-      I, getMDString(I, llvm::mdk::ContBlockKey)->getString().str());
+      I, ContMDS->getString().str());
+  
+  llvm::MDString *BodyMDS = getMDString(I, llvm::mdk::BodyBlockKey);
+  
+  if (BodyMDS)
   Res->WhileInfo.BodyBB = SearchBasicBlockByLabel(
-      I, getMDString(I, llvm::mdk::BodyBlockKey)->getString().str());
+      I, BodyMDS->getString().str());
 
-  // TODO: extend to make use of compound conditions from metadata
   Res->Kind = NormalizedBranchKind::While;
   return Res;
 }
@@ -5134,6 +5156,10 @@ void CWriter::visitBranchInst(BranchInst &I,
     return;
   case NormalizedBranchKind::CCReturn:
     emitReturn(NBI->CCReturnInfo);
+    return;
+  case NormalizedBranchKind::UnconditionalJump:
+    printBasicBlock(I.getSuccessor(0),
+                    printBasicBlockCustomArgs(false, false, false));
     return;
   default:
     llvm::errs() << "[visitBranchInst] Ignoring\n";
