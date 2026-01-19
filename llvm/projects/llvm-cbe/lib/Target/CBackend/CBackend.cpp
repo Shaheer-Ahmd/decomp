@@ -598,8 +598,17 @@ raw_ostream &CWriter::printTypeString(raw_ostream &Out, Type *Ty,
 
 std::string CWriter::getStructName(StructType *ST) {
   cwriter_assert(ST->getNumElements() != 0);
-  if (!ST->isLiteral() && !ST->getName().empty())
-    return "struct l_struct_" + CBEMangle(ST->getName().str());
+  if (!ST->isLiteral() && !ST->getName().empty()) {
+    std::string Name = ST->getName().str();
+
+    // Strip the "struct." prefix if it exists
+    if (Name.find("struct.") == 0) {
+      Name = Name.substr(7); // "struct." is 7 chars
+    }
+    return "struct " + Name;
+    // return "struct l_struct_" + CBEMangle(ST->getName().str());
+
+  } 
 
   unsigned id = UnnamedStructIDs.getOrInsert(ST);
   return "struct l_unnamed_" + utostr(id);
