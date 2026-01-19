@@ -1561,10 +1561,10 @@ void CWriter::printConstant(Constant *CPV, enum OperandContext Context) {
       return;
 
     case Instruction::GetElementPtr:
-      Out << "(";
+      // Out << "(";
       printGEPExpression(CE->getOperand(0), CPV->getNumOperands(),
                          gep_type_begin(CPV), gep_type_end(CPV));
-      Out << ")";
+      // Out << ")";
       return;
     case Instruction::Select:
       Out << '(';
@@ -2134,27 +2134,6 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
   llvm::errs() << "writeOperandInternal called for: " << *Operand << "\n";
   if (Instruction *I = dyn_cast<Instruction>(Operand)) {
     llvm::errs() << "Operand is an instruction\n";
-    if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
-      llvm::errs() << "Operand is a GEP instruction\n";
-      gep_type_iterator gi = gep_type_begin(GEP);
-      gep_type_iterator ge = gep_type_end(GEP);
-      
-      bool isStructFieldAccess = false;
-      if (gi != ge) {
-        Value *firstIdx = gi.getOperand();
-        ++gi;
-        if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero() &&
-            gi != ge && gi.isStruct()) {
-          isStructFieldAccess = true;
-        }
-      }
-      
-      if (isStructFieldAccess) {
-        writeInstComputationInline(*I);
-        return;
-      }
-    }
-   
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
       if (customArgs.wrapInParens)
         Out << '(';
@@ -2173,78 +2152,20 @@ void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
   }
 
   Constant *CPV = dyn_cast<Constant>(Operand);
-  
+  if (CPV) {
+    llvm::errs() << " was a constant\n";
+  }
   if (CPV && !isa<GlobalValue>(CPV)) {
-    llvm::errs() << "Operand is a non global constant value\n";
+    llvm::errs() << "not global CPV\n";
     printConstant(CPV, Context);
     return;
-  } 
-  
-  if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Operand)) {
-    Type *varType = GV->getValueType();
-    
-    if (ArrayType *AT = dyn_cast<ArrayType>(varType)) {
-      Type *elemType = AT->getElementType();
-      if (StructType *ST = dyn_cast<StructType>(elemType)) {
-        if (ST->getNumElements() > 0) {
-          Type *firstFieldType = ST->getElementType(0);
-          if (firstFieldType->isArrayTy()) {
-            std::string fieldName = getFieldNameFromMetadata(ST, 0);
-            if (!fieldName.empty()) {
-              Out << GV->getName().str() << "[0]." << fieldName;
-              return;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  else if (ConstantExpr *CE = dyn_cast<ConstantExpr>(Operand)) {
-    llvm::errs() << "Operand is a constant expression\n";
-    if (CE->getOpcode() == Instruction::GetElementPtr) {
-      GEPOperator *GEPOp = cast<GEPOperator>(CE);
-      Type *sourceType = GEPOp->getSourceElementType();
-      
-      if (sourceType->isArrayTy() && CE->getNumOperands() >= 3) {
-        Value *base = CE->getOperand(0);
-        Value *firstIdx = CE->getOperand(1);
-        Value *secondIdx = CE->getOperand(2);
-        
-        if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
-          Type *elemType = cast<ArrayType>(sourceType)->getElementType();
-          
-          if (StructType *ST = dyn_cast<StructType>(elemType)) {
-            if (ST->getNumElements() > 0) {
-              Type *firstFieldType = ST->getElementType(0);
-              if (firstFieldType->isArrayTy()) {
-                std::string fieldName = getFieldNameFromMetadata(ST, 0);
-                if (!fieldName.empty()) {
-                  if (GlobalVariable *GV = dyn_cast<GlobalVariable>(base)) {
-                    Out << GV->getName().str();
-                  } else {
-                    writeOperand(base);
-                  }
-                  Out << "[";
-                  writeOperand(secondIdx);
-                  Out << "]." << fieldName;
-                  return;
-                }
-              }
-            }
-          }
-        }
-      }
-      
-      printConstant(CPV, Context);
-      return;
-    }
-  }
-  
-  else {
+  } else {
+    llvm::errs() << " get value name\n";
     Out << GetValueName(Operand);
     return;
   }
+
+  llvm::errs() << " this shoudn't be printed\n";
 }
 
 static BasicBlock *SearchBasicBlockByLabel(Instruction &I, std::string key) {
@@ -6614,14 +6535,73 @@ std::string CWriter::getFieldNameFromMetadata(const StructType *ST, unsigned Fie
 void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
                                  gep_type_iterator I, gep_type_iterator E,
                                  std::optional<Type *> SourceType) {
+  // Early exit: no indices
   if (I == E) {
     writeOperand(Ptr);
     return;
   }
 
-  std::function<void(Value*, StructType*, const std::string&)> emitBaseDotOrArrow = 
-    [&](Value *BasePtr, StructType *ST, const std::string &FieldName) {
-    
+  writeOperandCustomArgs argNoParens{};
+  argNoParens.wrapInParens = false;
+
+  auto analyzeStructAccess = [](gep_type_iterator begin, gep_type_iterator end,
+                                unsigned *outFieldIdx, StructType **outStructType) -> bool {
+    if (begin == end) return false;
+
+    Value *firstIdx = begin.getOperand();
+    gep_type_iterator second = begin;
+    ++second;
+
+    if (!isa<ConstantInt>(firstIdx) || !cast<ConstantInt>(firstIdx)->isZero())
+      return false;
+
+    if (second == end || !second.isStruct())
+      return false;
+
+    Value *structIdxV = second.getOperand();
+    if (!isa<ConstantInt>(structIdxV))
+      return false;
+
+    if (outFieldIdx)
+      *outFieldIdx = cast<ConstantInt>(structIdxV)->getZExtValue();
+    if (outStructType)
+      *outStructType = second.getStructType();
+
+    return true;
+  };
+
+  auto allRemainingAreZeros = [](gep_type_iterator begin, gep_type_iterator end) -> bool {
+    for (auto it = begin; it != end; ++it) {
+      Value *idx = it.getOperand();
+      if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  auto printRemainingIndices = [&](gep_type_iterator begin, gep_type_iterator end) {
+    for (auto it = begin; it != end; ++it) {
+      Value *Opnd = it.getOperand();
+      Out << "[";
+      // Optimize away unnecessary integer casts
+      if (CastInst *CI = dyn_cast<CastInst>(Opnd)) {
+        if (CI->isIntegerCast()) {
+          // Print the inner operand without extra parentheses
+          writeOperand(CI->getOperand(0), ContextNormal, argNoParens);
+        } else {
+          writeOperand(Opnd, ContextNormal, argNoParens);
+        }
+      } else {
+        writeOperand(Opnd, ContextNormal, argNoParens);
+      }
+      Out << "]";
+    }
+  };
+
+  // Recursive helper to emit base.field or base->field
+  std::function<void(Value*, StructType*, const std::string&)> emitBaseDotOrArrow;
+  emitBaseDotOrArrow = [&](Value *BasePtr, StructType *ST, const std::string &FieldName) {
     if (AllocaInst *AI = dyn_cast<AllocaInst>(BasePtr)) {
       if (AI->getAllocatedType()->isStructTy() && !AI->getName().empty()) {
         Out << AI->getName().str() << "." << FieldName;
@@ -6629,24 +6609,55 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
       }
     }
 
+    // Case 2: Nested GEP instruction (recursive case)
     if (GetElementPtrInst *BaseGEP = dyn_cast<GetElementPtrInst>(BasePtr)) {
-      gep_type_iterator bgi = gep_type_begin(BaseGEP);
-      gep_type_iterator bge = gep_type_end(BaseGEP);
-      
-      if (bgi != bge) {
-        Value *firstIdx = bgi.getOperand();
-        ++bgi;
-        if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero() &&
-            bgi != bge && bgi.isStruct()) {
-          Value *structIdxV = bgi.getOperand();
-          if (isa<ConstantInt>(structIdxV)) {
-            unsigned BaseFieldIdx = (unsigned)cast<ConstantInt>(structIdxV)->getZExtValue();
-            StructType *BaseST = bgi.getStructType();
-            std::string BaseFieldName = getFieldNameFromMetadata(BaseST, BaseFieldIdx);
-            
-            if (!BaseFieldName.empty()) {
-              Value *BaseBase = BaseGEP->getPointerOperand();
-              emitBaseDotOrArrow(BaseBase, BaseST, BaseFieldName);
+      unsigned baseFieldIdx;
+      StructType *baseST;
+
+      if (analyzeStructAccess(gep_type_begin(BaseGEP), gep_type_end(BaseGEP),
+                              &baseFieldIdx, &baseST)) {
+        std::string baseFieldName = getFieldNameFromMetadata(baseST, baseFieldIdx);
+        if (!baseFieldName.empty()) {
+          emitBaseDotOrArrow(BaseGEP->getPointerOperand(), baseST, baseFieldName);
+          Out << "." << FieldName;
+          return;
+        }
+      }
+    }
+
+    // Case 3: Constant GEP expression
+    if (ConstantExpr *CE = dyn_cast<ConstantExpr>(BasePtr)) {
+      if (CE->getOpcode() == Instruction::GetElementPtr && CE->getNumOperands() >= 3) {
+        GEPOperator *GEPOp = cast<GEPOperator>(CE);
+        Type *sourceType = GEPOp->getSourceElementType();
+
+        Value *base = CE->getOperand(0);
+        Value *firstIdx = CE->getOperand(1);
+        Value *secondIdx = CE->getOperand(2);
+
+        if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
+
+          // Case 3a: Array indexing (e.g., people[1])
+          if (sourceType->isArrayTy()) {
+            if (GlobalVariable *GV = dyn_cast<GlobalVariable>(base)) {
+              Out << GV->getName().str();
+            } else {
+              writeOperand(base);
+            }
+            Out << "[";
+            writeOperand(secondIdx, ContextNormal, argNoParens);
+            Out << "]." << FieldName;
+            return;
+          }
+
+          // Case 3b: Nested struct in constant GEP
+          if (sourceType->isStructTy() && isa<ConstantInt>(secondIdx)) {
+            unsigned structFieldIdx = cast<ConstantInt>(secondIdx)->getZExtValue();
+            StructType *innerST = cast<StructType>(sourceType);
+            std::string innerFieldName = getFieldNameFromMetadata(innerST, structFieldIdx);
+
+            if (!innerFieldName.empty()) {
+              emitBaseDotOrArrow(base, innerST, innerFieldName);
               Out << "." << FieldName;
               return;
             }
@@ -6654,61 +6665,24 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
         }
       }
     }
-    
-    if (ConstantExpr *CE = dyn_cast<ConstantExpr>(BasePtr)) {
-      if (CE->getOpcode() == Instruction::GetElementPtr) {
-        GEPOperator *GEPOp = cast<GEPOperator>(CE);
-        Type *sourceType = GEPOp->getSourceElementType();
-        
-        if (CE->getNumOperands() >= 3) {
-          Value *base = CE->getOperand(0);
-          Value *firstIdx = CE->getOperand(1);
-          Value *secondIdx = CE->getOperand(2);
-          
-          if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
-            
-            if (sourceType->isArrayTy()) {
-              if (GlobalVariable *GV = dyn_cast<GlobalVariable>(base)) {
-                Out << GV->getName().str();
-              } else {
-                writeOperand(base);
-              }
-              
-              Out << "[";
-              writeOperand(secondIdx);
-              Out << "]." << FieldName;
-              return;
-            } else if (sourceType->isStructTy() && isa<ConstantInt>(secondIdx)) {
-              unsigned structFieldIdx = cast<ConstantInt>(secondIdx)->getZExtValue();
-              StructType *innerST = cast<StructType>(sourceType);
-              std::string innerFieldName = getFieldNameFromMetadata(innerST, structFieldIdx);
-              
-              if (!innerFieldName.empty()) {
-                emitBaseDotOrArrow(base, innerST, innerFieldName);
-                Out << "." << FieldName;
-                return;
-              }
-            }
-          }
-        }
-      }
-    }
 
+    // Case 4: Global array of structs
     if (GlobalVariable *GV = dyn_cast<GlobalVariable>(BasePtr)) {
       Type *varType = GV->getValueType();
-      
       if (varType->isArrayTy()) {
         Out << GV->getName().str() << "[0]." << FieldName;
         return;
       }
     }
 
+    // Case 5: Generic pointer (use ->)
     if (BasePtr->getType()->isPointerTy()) {
       writeOperand(BasePtr);
       Out << "->" << FieldName;
       return;
     }
 
+    // Fallback: cast to pointer
     Out << "((";
     printTypeName(Out, ST);
     Out << "*)";
@@ -6716,181 +6690,56 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
     Out << ")->" << FieldName;
   };
 
-  if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
-    gep_type_iterator gi = gep_type_begin(GEP);
-    gep_type_iterator ge = gep_type_end(GEP);
+  unsigned fieldIdx;
+  StructType *structType;
 
-    if (gi != ge) {
-      Value *firstIdx = gi.getOperand();
-      ++gi;
-      
-      if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero() &&
-          gi != ge && gi.isStruct()) {
-        Value *structIdxV = gi.getOperand();
-        
-        if (isa<ConstantInt>(structIdxV)) {
-          unsigned FieldIdx = (unsigned)cast<ConstantInt>(structIdxV)->getZExtValue();
-          StructType *ST = gi.getStructType();
-          std::string FieldName = getFieldNameFromMetadata(ST, FieldIdx);
+  if (analyzeStructAccess(I, E, &fieldIdx, &structType)) {
+    std::string fieldName = getFieldNameFromMetadata(structType, fieldIdx);
 
-          if (!FieldName.empty()) {
-            Value *BasePtr = GEP->getPointerOperand();
-            emitBaseDotOrArrow(BasePtr, ST, FieldName);
-            ++gi;
-          
-            if (I != E) {
-              gep_type_iterator localI = I;
-              Value *firstIdx = localI.getOperand();
-              if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
-                ++localI;
-                if (localI != E && localI.isStruct()) {
-                  Value *structIdxV = localI.getOperand();
-                  if (isa<ConstantInt>(structIdxV)) {
-                    unsigned FieldIdx = (unsigned)cast<ConstantInt>(structIdxV)->getZExtValue();
-                    StructType *ST2 = localI.getStructType();
-                    std::string FieldName2 = getFieldNameFromMetadata(ST2, FieldIdx);
-                  
-                    if (!FieldName2.empty()) {
-                      Out << "." << FieldName2;
-                      ++localI;
-                    
-                      if (localI == E) return;
-                    
-                      bool allZeros = true;
-                      for (gep_type_iterator rem = localI; rem != E; ++rem) {
-                        Value *idx = rem.getOperand();
-                        if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
-                          allZeros = false;
-                          break;
-                        }
-                      }
-                      if (allZeros) return;
-                    
-                      for (; localI != E; ++localI) {
-                        Value *Opnd = localI.getOperand();
-                        Out << "[";
-                        writeOperand(Opnd);
-                        Out << "]";
-                      }
-                      return;
-                    }
-                  }
-                }
-              }
-            }
-          
-            if (gi == ge) return;
+    if (!fieldName.empty()) {
+      emitBaseDotOrArrow(Ptr, structType, fieldName);
 
-            bool allZeros = true;
-            for (gep_type_iterator rem = gi; rem != ge; ++rem) {
-              Value *idx = rem.getOperand();
-              if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
-                allZeros = false;
-                break;
-              }
-            }
+      ++I;  
+      ++I;  
 
-            if (allZeros) return;
-
-            for (; gi != ge; ++gi) {
-              Value *Opnd = gi.getOperand();
-              Out << "[";
-              writeOperand(Opnd);
-              Out << "]";
-            }
-            return;
-          }
-        }
-      }
-    }
-  }
-
-  {
-    gep_type_iterator localI = I;
-    Value *firstIdx = localI.getOperand();
-    
-    if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
-      ++localI;
-      
-      if (localI != E && localI.isStruct()) {
-        Value *structIdxV = localI.getOperand();
-        
-        if (isa<ConstantInt>(structIdxV)) {
-          unsigned FieldIdx = (unsigned)cast<ConstantInt>(structIdxV)->getZExtValue();
-          StructType *ST = localI.getStructType();
-          std::string FieldName = getFieldNameFromMetadata(ST, FieldIdx);
-
-          if (!FieldName.empty()) {
-            emitBaseDotOrArrow(Ptr, ST, FieldName);
-
-            Type *accessedFieldType = ST->getElementType(FieldIdx);
-            if (accessedFieldType->isStructTy()) {
-              StructType *fieldST = cast<StructType>(accessedFieldType);
-              if (fieldST->getNumElements() > 0) {
-                Type *firstElemType = fieldST->getElementType(0);
-                if (firstElemType->isArrayTy()) {
-                  std::string firstFieldName = getFieldNameFromMetadata(fieldST, 0);
-                  if (!firstFieldName.empty()) {
-                    Out << "." << firstFieldName;
-                  }
-                }
-              }
-            }
-
-            ++localI;
-            
-            if (localI == E) return;
-            
-            bool allZeros = true;
-            for (gep_type_iterator rem = localI; rem != E; ++rem) {
-              Value *idx = rem.getOperand();
-              if (!isa<ConstantInt>(idx) || !cast<ConstantInt>(idx)->isZero()) {
-                allZeros = false;
-                break;
-              }
-            }
-            
-            if (allZeros) return;
-            
-            for (; localI != E; ++localI) {
-              Value *Opnd = localI.getOperand();
-              Out << "[";
-              writeOperand(Opnd);
-              Out << "]";
-            }
-            return;
-          }
-        }
-      }
+      if (I == E) return;
+      if (allRemainingAreZeros(I, E)) return;
+      printRemainingIndices(I, E);
+      return;
     }
   }
 
   gep_type_iterator checkI = I;
   if (checkI != E) {
     Value *firstIdx = checkI.getOperand();
+
     if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
       ++checkI;
+
       if (checkI != E && !checkI.isStruct()) {
-        bool ptrIsSpecialGlobal = false;
+        bool isSpecialGlobal = false;
+        std::string specialFieldName;
+
         if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Ptr)) {
           Type *varType = GV->getValueType();
           if (varType->isArrayTy()) {
             Type *elemType = varType->getArrayElementType();
-            if (elemType->isStructTy()) {
-              StructType *ST = cast<StructType>(elemType);
-              Type *firstFieldType = ST->getElementType(0);
-              if (firstFieldType->isArrayTy()) {
-                std::string firstFieldName = getFieldNameFromMetadata(ST, 0);
-                if (!firstFieldName.empty()) {
-                  ptrIsSpecialGlobal = true;
-                  Out << GV->getName().str();
+            if (StructType *ST = dyn_cast<StructType>(elemType)) {
+              if (ST->getNumElements() > 0) {
+                Type *firstFieldType = ST->getElementType(0);
+                if (firstFieldType->isArrayTy()) {
+                  specialFieldName = getFieldNameFromMetadata(ST, 0);
+                  if (!specialFieldName.empty()) {
+                    isSpecialGlobal = true;
+                    Out << GV->getName().str();
+                  }
                 }
               }
             }
           }
         }
 
-        if (!ptrIsSpecialGlobal) {
+        if (!isSpecialGlobal) {
           if (AllocaInst *AI = dyn_cast<AllocaInst>(Ptr)) {
             Out << AI->getName().str();
           } else if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Ptr)) {
@@ -6899,111 +6748,32 @@ void CWriter::printGEPExpression(Value *Ptr, unsigned NumOperands,
             writeOperandInternal(Ptr);
           }
         }
-        
         ++I;
-        
-        for (; I != E; ++I) {
-          Value *Opnd = I.getOperand();
-          Out << "[";
-          
-          if (CastInst *CI = dyn_cast<CastInst>(Opnd)) {
-            if (CI->isIntegerCast()) {
-              writeOperand(CI->getOperand(0));
-            } else {
-              writeOperand(Opnd);
-            }
-          } else {
-            writeOperand(Opnd);
-          }
-          
-          Out << "]";
+        printRemainingIndices(I, E);
+        if (isSpecialGlobal) {
+          Out << "." << specialFieldName;
         }
-        
-        if (ptrIsSpecialGlobal && I == E) {
-          if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Ptr)) {
-            Type *varType = GV->getValueType();
-            if (varType->isArrayTy()) {
-              Type *elemType = varType->getArrayElementType();
-              if (elemType->isStructTy()) {
-                StructType *ST = cast<StructType>(elemType);
-                std::string firstFieldName = getFieldNameFromMetadata(ST, 0);
-                Out << "." << firstFieldName;
-              }
-            }
-          }
-        }
+
         return;
       }
     }
   }
 
   writeOperandInternal(Ptr);
-  for (; I != E; ++I) {
-    Value *Opnd = I.getOperand();
-    Out << "[";
-    
-    if (CastInst *CI = dyn_cast<CastInst>(Opnd)) {
-      if (CI->isIntegerCast()) {
-        writeOperand(CI->getOperand(0));
-      } else {
-        writeOperand(Opnd);
-      }
-    } else {
-      writeOperand(Opnd);
-    }
-    
-    Out << "]";
-  }
+  printRemainingIndices(I, E);
 }
 
 
 void CWriter::writeMemoryAccess(Value *Operand, Type *OperandType,
                                 bool IsVolatile, unsigned Alignment) {
-  bool isGEP = false;
-  GetElementPtrInst *GEP = nullptr;
-  ConstantExpr *CE = nullptr;
   
-  if ((GEP = dyn_cast<GetElementPtrInst>(Operand))) {
-    isGEP = true;
-  } else if ((CE = dyn_cast<ConstantExpr>(Operand)) && CE->getOpcode() == Instruction::GetElementPtr) {
-    isGEP = true;
-  }
-  
-  if (isGEP) {
-    bool isStructFieldAccess = false;
-    
-    if (GEP) {
-      gep_type_iterator gi = gep_type_begin(GEP);
-      gep_type_iterator ge = gep_type_end(GEP);
-      
-      if (gi != ge) {
-        Value *firstIdx = gi.getOperand();
-        ++gi;
-        if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero() &&
-            gi != ge && gi.isStruct()) {
-          isStructFieldAccess = true;
-        }
-      }
-    } else if (CE) {
-      if (CE->getNumOperands() >= 3) {
-        Value *firstIdx = CE->getOperand(1);
-        Value *secondIdx = CE->getOperand(2);
-        
-        if (isa<ConstantInt>(firstIdx) && cast<ConstantInt>(firstIdx)->isZero()) {
-          GEPOperator *GEPOp = cast<GEPOperator>(CE);
-          Type *sourceType = GEPOp->getSourceElementType();
-          
-          if (sourceType->isStructTy() && isa<ConstantInt>(secondIdx)) {
-            isStructFieldAccess = true;
-          }
-        }
-      }
-    }
-    
-    writeOperand(Operand);
+  if (isa<GetElementPtrInst>(Operand) || 
+      (isa<ConstantExpr>(Operand) && 
+       cast<ConstantExpr>(Operand)->getOpcode() == Instruction::GetElementPtr)) {
+    writeOperandInternal(Operand);
     return;
   }
-  
+
   auto ActualType = tryGetTypeOfAddressExposedValue(Operand);
   if (ActualType.has_value() && !IsVolatile) {
     if (ActualType.value() != OperandType) {
