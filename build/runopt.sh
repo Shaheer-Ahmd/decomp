@@ -12,4 +12,4 @@ if [ -n "$2" ]; then
   DST="$2"
 fi
 
-./bin/opt -S -passes='mem2reg,instcombine,simplifycfg' "$SRC" -o "$DST" --color
+./bin/opt -S -passes='mem2reg,instcombine,simplifycfg' "$SRC" -o "$DST" --color && ./runp2s.sh "$DST"

@@ -9,3 +9,5 @@ fi
 DST="${SRC%.ll}.cbe.c"
 
 ../build-cbe/bin/llvm-cbe "$SRC" && clang-format -i "$DST"
+
+echo "Lifted LLVM IR ($SRC) -> CBE C source ($DST)"

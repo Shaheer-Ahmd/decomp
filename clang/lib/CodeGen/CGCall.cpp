@@ -3836,7 +3836,7 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
     switch (getEvaluationKind(RetTy)) {
     case TEK_Complex: {
       ComplexPairTy RT =
-          EmitLoadOfComplex(MakeAddrLValue(ReturnValue, RetTy), EndLoc);
+        EmitLoadOfComplex(MakeAddrLValue(ReturnValue, RetTy), EndLoc);
       EmitStoreOfComplex(RT, MakeNaturalAlignAddrLValue(&*AI, RetTy),
                          /*isInit*/ true);
       break;
@@ -3870,7 +3870,8 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
 
       // If there is a dominating store to ReturnValue, we can elide
       // the load, zap the store, and usually zap the alloca.
-      if (llvm::StoreInst *SI = findDominatingStoreToReturnValue(*this)) {
+      if (llvm::StoreInst *SI =
+              findDominatingStoreToReturnValue(*this)) {
         // Reuse the debug location from the store unless there is
         // cleanup code to be emitted between the store and return
         // instruction.
@@ -3880,7 +3881,7 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
         RV = SI->getValueOperand();
         SI->eraseFromParent();
 
-        // Otherwise, we have to do a simple load.
+      // Otherwise, we have to do a simple load.
       } else {
         RV = Builder.CreateLoad(ReturnValue);
       }
@@ -3910,7 +3911,8 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
       else
         llvm_unreachable("Unexpected function/method type");
 
-      assert(getLangOpts().ObjCAutoRefCount && !FI.isReturnsRetained() &&
+      assert(getLangOpts().ObjCAutoRefCount &&
+             !FI.isReturnsRetained() &&
              RT->isObjCRetainableType());
 #endif
       RV = emitAutoreleaseOfResult(*this, RV);
@@ -3925,7 +3927,7 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
     auto coercionType = RetAI.getCoerceAndExpandType();
 
     // Load all of the coerced elements out into results.
-    llvm::SmallVector<llvm::Value *, 4> results;
+    llvm::SmallVector<llvm::Value*, 4> results;
     Address addr = ReturnValue.withElementType(coercionType);
     for (unsigned i = 0, e = coercionType->getNumElements(); i != e; ++i) {
       auto coercedEltType = coercionType->getElementType(i);
@@ -3941,7 +3943,7 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
     if (results.size() == 1) {
       RV = results[0];
 
-      // Otherwise, we need to make a first-class aggregate.
+    // Otherwise, we need to make a first-class aggregate.
     } else {
       // Construct a return type that lacks padding elements.
       llvm::Type *returnType = RetAI.getUnpaddedCoerceAndExpandType();
@@ -3976,146 +3978,6 @@ void CodeGenFunction::EmitFunctionEpilog(const CGFunctionInfo &FI,
 
   if (RetDbgLoc)
     Ret->setDebugLoc(std::move(RetDbgLoc));
-  llvm::LLVMContext &Ctx = CGM.getLLVMContext();
-  std::string ReturnStatement = "return ";
-
-  // 🔹 Process the return value
-  if (SSAMap.find(RV) != SSAMap.end()) {
-    ReturnStatement += SSAMap[RV];
-  } else if (llvm::ConstantInt *CI = llvm::dyn_cast<llvm::ConstantInt>(RV)) {
-    ReturnStatement += std::to_string(CI->getSExtValue());
-  } else if (llvm::Instruction *Instr = llvm::dyn_cast<llvm::Instruction>(RV)) {
-    if (Instr->isBinaryOp() && Instr->getNumOperands() >= 2) {
-      std::string LHS = "<unknown>", RHS = "<unknown>";
-
-      llvm::Value *Op1 = Instr->getOperand(0);
-      llvm::Value *Op2 = Instr->getOperand(1);
-
-      // 🔹 Retrieve SSA-mapped names if available
-      if (SSAMap.find(Op1) != SSAMap.end()) {
-        LHS = SSAMap[Op1];
-      } else if (Op1->hasName()) {
-        LHS = Op1->getName().str();
-      }
-
-      if (SSAMap.find(Op2) != SSAMap.end()) {
-        RHS = SSAMap[Op2];
-      } else if (Op2->hasName()) {
-        RHS = Op2->getName().str();
-      }
-
-      // 🔹 Detect operator type
-      std::string OpType = "<unknown>";
-      switch (Instr->getOpcode()) {
-      case llvm::Instruction::Add:
-        OpType = "+";
-        break;
-      case llvm::Instruction::Sub:
-        OpType = "-";
-        break;
-      case llvm::Instruction::Mul:
-        OpType = "*";
-        break;
-      case llvm::Instruction::SDiv:
-        OpType = "/";
-        break;
-      case llvm::Instruction::SRem:
-        OpType = "%";
-        break;
-      default:
-        OpType = "<?>";
-      }
-
-      // 🔹 Update SSA map for RV before returning
-      std::string ComputedValue = LHS + " " + OpType + " " + RHS;
-      SSAMap[RV] = ComputedValue;
-      ReturnStatement += ComputedValue;
-    }
-  }
-  // 🔹 Attach metadata only if Ret is an Instruction
-  if (llvm::Instruction *RetInstr = llvm::dyn_cast<llvm::Instruction>(Ret)) {
-    llvm::MDNode *ReturnMeta =
-        llvm::MDNode::get(Ctx, {llvm::MDString::get(Ctx, ReturnStatement)});
-    RetInstr->setMetadata("return_stmt", ReturnMeta);
-  }
-
-  //     llvm::LLVMContext &Ctx = CGM.getLLVMContext();
-  //     std::string ReturnStatement = "return ";
-  //     llvm::errs() << "Processing return value: " << RV << "\n";
-  // llvm::errs() << "RV address: " << RV << "\n";
-
-  // // Check SSAMap for RV
-  // if (SSAMap.find(RV) != SSAMap.end()) {
-  //     llvm::errs() << "SSAMap[" << RV << "] = " << SSAMap[RV] << "\n";
-  // } else {
-  //     llvm::errs() << "RV not found in SSAMap.\n";
-  // }
-
-  //     if (llvm::ConstantInt *CI = llvm::dyn_cast<llvm::ConstantInt>(RV)) {
-  //         ReturnStatement += std::to_string(CI->getSExtValue());
-  //     }
-  //     else if (SSAMap.find(RV) != SSAMap.end()) {
-  //         // Use SSA-mapped name if available
-  //         ReturnStatement += SSAMap[RV];
-  //     }
-  //     else if (RV->hasName()) {
-  //         // Use variable name if available
-  //         ReturnStatement += RV->getName().str();
-  //     }
-  //     else if (llvm::Instruction *Instr =
-  //     llvm::dyn_cast<llvm::Instruction>(RV)) {
-  //         if (Instr->isBinaryOp()) {
-  //             std::string LHS = "<unknown>", RHS = "<unknown>";
-
-  //             llvm::Value *Op1 = Instr->getOperand(0);
-  //             llvm::Value *Op2 = Instr->getOperand(1);
-
-  //             // 🔹 Check SSA Map for Op1
-  //             if (SSAMap.find(Op1) != SSAMap.end()) {
-  //                 LHS = SSAMap[Op1];
-  //             } else if (Op1->hasName()) {
-  //                 LHS = Op1->getName().str();
-  //             } else {
-  //                 llvm::errs() << "Op1 has no name or SSA entry!\n";
-  //             }
-
-  //             // 🔹 Check SSA Map for Op2
-  //             if (SSAMap.find(Op2) != SSAMap.end()) {
-  //                 RHS = SSAMap[Op2];
-  //             } else if (Op2->hasName()) {
-  //                 RHS = Op2->getName().str();
-  //             } else {
-  //                 llvm::errs() << "Op2 has no name or SSA entry!\n";
-  //             }
-
-  //             // 🔹 Detect operator type
-  //             std::string OpType = "<unknown>";
-  //             if (Instr->getOpcode() == llvm::Instruction::Add) OpType = "+";
-  //             else if (Instr->getOpcode() == llvm::Instruction::Sub) OpType =
-  //             "-"; else if (Instr->getOpcode() == llvm::Instruction::Mul)
-  //             OpType = "*"; else if (Instr->getOpcode() ==
-  //             llvm::Instruction::SDiv) OpType = "/"; else if
-  //             (Instr->getOpcode() == llvm::Instruction::SRem) OpType = "%";
-
-  //             // Construct return statement
-  //             ReturnStatement += LHS + " " + OpType + " " + RHS;
-  //         }
-  //         else {
-  //             ReturnStatement += "<expr>;";
-  //         }
-  //     }
-  //     else {
-  //         ReturnStatement += "<expr>;";
-  //     }
-
-  //     // Debugging output
-  //     llvm::errs() << "Final Generated Return Metadata: " << ReturnStatement
-  //     << "\n";
-
-  //     // 🔹 Attach metadata
-  //     llvm::MDNode *ReturnMeta = llvm::MDNode::get(
-  //         Ctx, {llvm::MDString::get(Ctx, ReturnStatement)});
-  //     Ret->setMetadata("return_stmt", ReturnMeta);
 }
 
 void CodeGenFunction::EmitReturnValueCheck(llvm::Value *RV) {

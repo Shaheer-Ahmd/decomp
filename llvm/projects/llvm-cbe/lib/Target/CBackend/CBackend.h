@@ -364,8 +364,7 @@ private:
   void forwardDeclareStructs(raw_ostream &Out, Type *Ty,
                              std::set<Type *> &TypesPrinted);
 
-  raw_ostream &printFunctionAttributes(raw_ostream &Out, AttributeList Attrs,
-                                       const Function *F);
+  raw_ostream &printFunctionAttributes(raw_ostream &Out, AttributeList Attrs);
 
   bool isStandardMain(const FunctionType *FTy);
   raw_ostream &printFunctionProto(raw_ostream &Out, FunctionInfoVariant FIV,

@@ -13,3 +13,5 @@ if [ "$1" == "optnone" ]; then
 else
   ./bin/clang -v -S -emit-llvm -fno-discard-value-names -O0 "$SRC" -o "$DST"
 fi
+
+echo "Lowered C source ($SRC) -> LLVM IR ($DST)"

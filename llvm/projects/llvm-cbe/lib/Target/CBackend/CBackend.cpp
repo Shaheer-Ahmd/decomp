@@ -620,14 +620,16 @@ std::string CWriter::getFunctionName(FunctionInfoVariant FIV) {
 }
 
 std::string CWriter::getArrayName(ArrayType *AT) {
+  // changed this to give uintx_t instead of struct l_array_xxx - Shaheer
   std::string astr;
   raw_string_ostream ArrayInnards(astr);
   // Arrays are wrapped in structs to allow them to have normal
   // value semantics (avoiding the array "decay").
   cwriter_assert(!isEmptyType(AT));
   printTypeName(ArrayInnards, AT->getElementType(), false);
-  return "struct l_array_" + utostr(AT->getNumElements()) + '_' +
-         CBEMangle(ArrayInnards.str());
+  return ArrayInnards.str();
+  // return "struct l_array_" + utostr(AT->getNumElements()) + '_' +
+  //        CBEMangle(ArrayInnards.str());
 }
 
 std::string CWriter::getVectorName(VectorType *VT) {
@@ -958,8 +960,7 @@ raw_ostream &CWriter::printStructDeclaration(raw_ostream &Out, StructType *STy, 
 }
 
 raw_ostream &CWriter::printFunctionAttributes(raw_ostream &Out,
-                                              AttributeList Attrs,
-                                              const Function *F) {
+                                              AttributeList Attrs) {
   SmallVector<std::string, 5> AttrsToPrint;
   for (const auto &FnAttr : Attrs.getFnAttrs()) {
     if (FnAttr.isEnumAttribute() || FnAttr.isIntAttribute()) {
@@ -1020,24 +1021,6 @@ raw_ostream &CWriter::printFunctionAttributes(raw_ostream &Out,
     }
   }
   if (!AttrsToPrint.empty()) {
-    if (F) {
-      if (MDNode *MD = F->getMetadata("func_signature")) {
-        if (MDString *MDStr = dyn_cast<MDString>(MD->getOperand(0))) {
-          std::string metadataStr = MDStr->getString().str();
-          std::string cleanStr = metadataStr.substr(
-              1, metadataStr.size() - 2); // Remove '{' and '}'
-          // std::cout << "The metadata string is: " << cleanStr << std::endl;
-
-          // TODO: Check how to handle the case of function attributes with the
-          // metadata - bilal
-          if (!cleanStr.empty()) {
-            return Out;
-          } else {
-            return Out;
-          }
-        }
-      }
-    }
     headerUseAttributeList();
     Out << " __ATTRIBUTELIST__((";
     bool DidPrintAttr = false;
@@ -1118,23 +1101,6 @@ raw_ostream &CWriter::printFunctionProto(raw_ostream &Out,
     headerUseNoReturn();
     Out << "__noreturn ";
   }
-  bool metaDataReturnType = false;
-  if (Name != "main") {
-    if (auto F = TryAsFunction(FIV)) {
-      if (MDNode *MD = F.value()->getMetadata("func_signature")) {
-        // Expect metadata to be a single MDString entry
-        if (MDString *MDStr = dyn_cast<MDString>(MD->getOperand(0))) {
-          std::string metadataStr = MDStr->getString().str();
-          std::string cleanStr = metadataStr.substr(
-              1, metadataStr.size() - 2); // Remove '{' and '}'
-          std::string formattedReturnType =
-              cleanStr.substr(0, cleanStr.find_first_of(';'));
-          customPrintSimpleType(Out, formattedReturnType);
-          metaDataReturnType = true;
-        }
-      }
-    }
-  }
 
   bool isStructReturn = false;
   if (shouldFixMain) {
@@ -1151,12 +1117,10 @@ raw_ostream &CWriter::printFunctionProto(raw_ostream &Out,
       // If this is a struct-return function, print the struct-return type.
       RetTy = GetParamStructRetType(FIV);
     }
-    if (!metaDataReturnType) {
-      printTypeName(
-          Out, RetTy,
-          /*isSigned=*/
-          PAL.hasAttributeAtIndex(AttributeList::ReturnIndex, Attribute::SExt));
-    }
+    printTypeName(
+        Out, RetTy,
+        /*isSigned=*/
+        PAL.hasAttributeAtIndex(AttributeList::ReturnIndex, Attribute::SExt));
   }
 
   switch (GetCallingConv(FIV)) {
@@ -1181,35 +1145,6 @@ raw_ostream &CWriter::printFunctionProto(raw_ostream &Out,
     break;
   }
   Out << ' ' << Name << '(';
-
-  if (auto F = TryAsFunction(FIV)) { // Get the function if FIV contains one
-    if (MDNode *MD = F.value()->getMetadata(
-            "func_signature")) { // Incorporated function parameters using
-                                 // metadata - bilal
-      // Expect metadata to be a single MDString entry
-      if (MDString *MDStr = dyn_cast<MDString>(MD->getOperand(0))) {
-        std::string metadataStr = MDStr->getString().str();
-        std::string cleanStr =
-            metadataStr.substr(1, metadataStr.size() - 2); // Remove '{' and '}'
-
-        std::stringstream ss(cleanStr);
-        std::vector<std::string> splitItems;
-        std::string item;
-
-        while (std::getline(ss, item, ';')) {
-          item.erase(0, item.find_first_not_of(" "));
-          item.erase(item.find_last_not_of(" ") + 1);
-          splitItems.push_back(item);
-        }
-
-        std::string formattedParams =
-            (splitItems.size() > 1) ? splitItems[1]
-                                    : ""; // Pick second item or empty string
-        Out << formattedParams << ")";
-        return Out;
-      }
-    }
-  }
 
   unsigned Idx = 1;
   unsigned ParameterIndex = 0;
@@ -1249,12 +1184,9 @@ raw_ostream &CWriter::printFunctionProto(raw_ostream &Out,
       Out << ", ";
     if (shouldFixMain)
       Out << MainArgs.begin()[Idx].first;
-    else {
-      // std::cout << "Calling printTypeName in printFunctionProto in condition
-      // that checks not fix main 2\n";
+    else
       printTypeName(Out, ArgTy,
                     /*isSigned=*/PAL.hasAttributeAtIndex(Idx, Attribute::SExt));
-    }
     PrintedArg = true;
     if (ArgName) {
       Out << ' ';
@@ -2069,6 +2001,62 @@ void CWriter::printConstantWithCast(Constant *CPV, unsigned Opcode) {
 
 std::string CWriter::GetValueName(const Value *Operand) {
 
+// --------------------------------------------------------------------------
+  // NEW LOGIC: Return raw string literals for constant string globals
+  // --------------------------------------------------------------------------
+  if (const GlobalVariable *GV = dyn_cast<GlobalVariable>(Operand)) {
+    if (GV->hasInitializer() && GV->isConstant()) {
+      const Constant *Init = GV->getInitializer();
+      
+      // Check if the initializer is a sequence of data
+      if (const ConstantDataSequential *CDS = dyn_cast<ConstantDataSequential>(Init)) {
+        
+        bool IsArray = CDS->getType()->isArrayTy();
+        bool IsInt8 = CDS->getElementType()->isIntegerTy(8);
+
+        if (CDS->isString() || (IsArray && IsInt8)) {
+          std::string StrContent = CDS->getAsString().str();
+          std::stringstream SS;
+          
+          SS << "\""; 
+
+          for (size_t i = 0; i < StrContent.size(); ++i) {
+            unsigned char C = StrContent[i];
+
+            // Skip trailing null terminator
+            if (C == '\0' && i == StrContent.size() - 1) {
+                continue;
+            }
+
+            // Escape special C characters
+            switch (C) {
+              case '"':  SS << "\\\""; break;
+              case '\\': SS << "\\\\"; break;
+              case '\n': SS << "\\n"; break;
+              case '\t': SS << "\\t"; break;
+              case '\r': SS << "\\r"; break;
+              case '\v': SS << "\\v"; break;
+              case '\f': SS << "\\f"; break;
+              default:
+                if (isprint(C)) {
+                  SS << C;
+                } else {
+                  // HEX PRINTING (No <iomanip> required)
+                  char HexBuf[8];
+                  // format as \xNN
+                  snprintf(HexBuf, sizeof(HexBuf), "\\x%02X", C);
+                  SS << HexBuf;
+                }
+            }
+          }
+          
+          SS << "\""; 
+          return SS.str();
+        }
+      }
+    }
+  }
+  // --------------------------------------------------------------------------
   // Resolve potential alias.
   if (const GlobalAlias *GA = dyn_cast<GlobalAlias>(Operand)) {
     Operand = GA->getAliasee();
@@ -2140,7 +2128,6 @@ void CWriter::writeInstComputationInline(Instruction &I) {
 
 void CWriter::writeOperandInternal(Value *Operand, enum OperandContext Context,
                                    writeOperandCustomArgs customArgs) {
-  llvm::errs() << "writeOperandInternal called for: " << *Operand << "\n";
   if (Instruction *I = dyn_cast<Instruction>(Operand)) {
     llvm::errs() << "Operand is an instruction\n";
     if (isInlinableInst(*I) && !isDirectAlloca(I)) {
@@ -3013,6 +3000,9 @@ void CWriter::generateHeader(Module &M) {
       // special\n";
       printTypeNameForAddressableValue(Out, ElTy, false);
       Out << ' ' << GetValueName(&*I);
+      if (ElTy->getTypeID() == Type::ArrayTyID) {
+        Out << "[" << cast<ArrayType>(ElTy)->getNumElements() << "]";
+      }
       if (IsOveraligned) {
         headerUseAligns();
         Out << " __POSTFIXALIGN__(" << Alignment << ")";
@@ -3108,7 +3098,7 @@ void CWriter::generateHeader(Module &M) {
     }
 
     printFunctionProto(Out, &*I, GetValueName(&*I));
-    printFunctionAttributes(Out, I->getAttributes(), &*I);
+    printFunctionAttributes(Out, I->getAttributes());
     if (I->hasWeakLinkage() || I->hasLinkOnceLinkage()) {
       headerUseAttributeWeak();
       Out << " __ATTRIBUTE_WEAK__";
@@ -3949,6 +3939,9 @@ void CWriter::declareOneGlobalVariable(GlobalVariable *I) {
   }
   printTypeNameForAddressableValue(Out, ElTy, false);
   Out << ' ' << GetValueName(I);
+  if (ElTy->getTypeID() == Type::ArrayTyID) {
+    Out << "[" << cast<ArrayType>(ElTy)->getNumElements() << "]";
+  }
   if (IsOveraligned) {
     headerUseAligns();
     Out << " __POSTFIXALIGN__(" << Alignment << ")";
@@ -4151,7 +4144,7 @@ void CWriter::forwardDeclareStructs(raw_ostream &Out, Type *Ty,
     // Since function declarations come before the definitions of array-wrapper
     // structs, it is sometimes necessary to forward-declare those.
   } else if (auto *AT = dyn_cast<ArrayType>(Ty)) {
-    Out << getArrayName(AT) << ";\n";
+    // Out << getArrayName(AT) << ";\n";
   } else if (auto *FT = dyn_cast<FunctionType>(Ty)) {
     llvm_unreachable(
         "forwardDeclareStructs should never be called with a function type");
@@ -4182,7 +4175,7 @@ void CWriter::printContainedTypes(raw_ostream &Out, Type *Ty,
     printStructDeclaration(Out, ST, *TheModule);
   } else if (ArrayType *AT = dyn_cast<ArrayType>(Ty)) {
     // Print array type out.
-    printArrayDeclaration(Out, AT);
+    // printArrayDeclaration(Out, AT);
   } else if (VectorType *VT = dyn_cast<VectorType>(Ty)) {
     // Print vector type out.
     printVectorDeclaration(Out, VT);
@@ -4243,6 +4236,8 @@ static StringRef getTypeForVarNameFromMD(const Module &M, StringRef VarName) {
 }
 
 void CWriter::printFunction(Function &F) {
+  llvm::errs() << "[printFunction] Printing function: "
+               << F.getName() << "\n";
   BlockNameToBlockPtrMap.clear();
   unsigned tmpId = 0;
   for (llvm::BasicBlock &BB : F) {
@@ -4365,14 +4360,27 @@ void CWriter::printFunction(Function &F) {
       // ssa_info
       // search for varname in the global VarNameToTypeMapping metadata
       StringRef varNameRef = getTypeForVarNameFromMD(*TheModule, GetValueName(AI));
+      int arrayLength = -1;
       if (!varNameRef.empty()) {
+        metadata_extracted = true;
         std::string varTypeStr = varNameRef.str();
+        // check if it is an array type
+        size_t pos = varTypeStr.find('[');
+        size_t endPos = varTypeStr.find(']', pos);
+        if (pos != std::string::npos && endPos != std::string::npos) {
+          std::string lenStr = varTypeStr.substr(pos + 1, endPos - pos - 1);
+          arrayLength = std::stoi(lenStr);
+          varTypeStr = varTypeStr.substr(0, pos);
+        }
         Out << varTypeStr;
       } else {
         printTypeNameForAddressableValue(Out, AI->getAllocatedType(), false);
       }
 
       Out << ' ' << GetValueName(AI);
+      if (arrayLength != -1) {
+        Out << "[" << arrayLength << "]";
+      }
       if (IsOveraligned) {
         headerUseAligns();
         Out << " __POSTFIXALIGN__(" << Alignment << ")";
@@ -4531,10 +4539,10 @@ void CWriter::printBasicBlock(BasicBlock *BB,
         if (canDeclareLocalLate(*II)) {
           printTypeName(Out, II->getType(), false) << ' ';
         }
-        llvm::errs() << "[printBasicBlock] emitting " <<
-            GetValueName(&*II) << "\n"; Out << GetValueName(&*II) << " = ";
+        llvm::errs() << "[printBasicBlock] emitting assign " << *II << "\n";
+        Out << GetValueName(&*II) << " = ";
       } else {
-        llvm::errs() << "[printBasicBlock] Do not emit " << GetValueName(&*II) << "\n";
+        llvm::errs() << "[printBasicBlock] Do not emit assign " << GetValueName(&*II) << "\n";
       }
 
       bool isUsedCall =
@@ -4566,6 +4574,7 @@ void CWriter::printBasicBlock(BasicBlock *BB,
 }
 
 void CWriter::emitReturn(ReturnShape returnShape) {
+  llvm::errs() << "[emitReturn] called\n";
   Out << "return ";
   emitCondition(returnShape.Cond);
   Out << ";\n";
@@ -4766,9 +4775,14 @@ void CWriter::emitIf(IfShape ifShape) {
   emitCondition(ifShape.Cond);
   Out << ")";
 
+  if (ifShape.JoinBB) {
+    // repetition fix: NCD must be printed by this level
+    InlinedBlocks.insert(ifShape.JoinBB);
+  }
+
   Out << " {\n";
-  printBasicBlock(ifShape.ThenBB,
-                  printBasicBlockCustomArgs(false, false, true));
+    printBasicBlock(ifShape.ThenBB,
+                    printBasicBlockCustomArgs(false, false, true));
   Out << "}";
 
   bool isElseNecessary = ifShape.ElseBB != ifShape.JoinBB;
@@ -4785,6 +4799,11 @@ void CWriter::emitIf(IfShape ifShape) {
       Out << "}\n";
     }
   }
+
+  if (ifShape.JoinBB) {
+    InlinedBlocks.erase(ifShape.JoinBB);
+  }
+  
   printBasicBlock(ifShape.JoinBB,
                   printBasicBlockCustomArgs(false, false, true));
 }
