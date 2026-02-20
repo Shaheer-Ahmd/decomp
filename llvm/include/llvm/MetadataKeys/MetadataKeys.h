@@ -31,8 +31,7 @@ inline constexpr StringLiteral LoopBreakKey{"LoopBreak"};
 inline constexpr StringLiteral IfContBlockKey{"if.cont_block"};
 inline constexpr StringLiteral ElseIfKey{"else_if"};
 
-inline constexpr StringLiteral McdcTreeKey{"mcdc.tree"};
-inline constexpr StringLiteral ContBlockShortCircuitKey{"contblock_shortcircuit"};
+inline constexpr StringLiteral LoopContinueKey{"LoopContinue"};
 
 } // namespace mymd
 } // namespace llvm

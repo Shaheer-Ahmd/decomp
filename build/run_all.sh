@@ -12,9 +12,6 @@ INPUT_C="$1"
 SPEC_ARGS="$2"
 
 # 3. Derive Directory and Base Filenames
-# If input is ./demotest/main.c:
-# DIR_NAME  -> ./demotest
-# BASE_NAME -> main
 DIR_NAME=$(dirname "$INPUT_C")
 BASE_NAME=$(basename "$INPUT_C" .c)
 
@@ -24,32 +21,62 @@ SP_FILE="${DIR_NAME}/${BASE_NAME}_sp.ll"         # ./demotest/main_sp.ll
 OPT_FILE="${DIR_NAME}/${BASE_NAME}_sp_opt.ll"    # ./demotest/main_sp_opt.ll
 EC_FILE="${DIR_NAME}/${BASE_NAME}_sp_opt_ec.ll"  # ./demotest/main_sp_opt_ec.ll
 
+# Temporary files for the convergence loop
+TEMP_CURRENT="${DIR_NAME}/${BASE_NAME}_temp_current.ll"
+TEMP_NEXT="${DIR_NAME}/${BASE_NAME}_temp_next.ll"
+
 # ==============================================================================
 # Execution Steps
 # ==============================================================================
 
-echo "[1/5] Compiling C to LLVM IR..."
-# Assuming runclang.sh accepts the input file as an argument. 
-# If runclang.sh is hardcoded, replace this line with: clang -S -emit-llvm -Xclang -disable-O0-optnone "$INPUT_C" -o "$LL_FILE"
+echo "[1/6] Compiling C to LLVM IR..."
 ./runclang.sh optnone "$INPUT_C"
 
-echo "[2/5] Running Argument Specialization..."
+echo "[2/6] Running Argument Specialization..."
 /usr/bin/opt -load-pass-plugin=/root/llvm/llvm/llvm-project/TrimmerPass/SpecializeArguments.so \
   -passes=specialize-args \
   -args="$SPEC_ARGS" \
   -S "$LL_FILE" -o "$SP_FILE"
 
-echo "[3/5] Running Optimization Pipeline (Unroll + IPSCCP + DCE)..."
-/usr/bin/opt -S -passes='function(mem2reg,instcombine,loop(indvars,loop-unroll-full)),ipsccp,function(dce)' \
-  "$SP_FILE" -o "$OPT_FILE"
+echo "[3/6] Running Optimization Pipeline (Unroll + IPSCCP + DCE) until convergence..."
+# Initialize the convergence loop by copying the input to our "current" temp file
+cp "$SP_FILE" "$TEMP_CURRENT"
+ITERATION=1
 
-echo "[4/5] Running P2S (Pointer to Stack)..."
+while true; do
+    echo "      -> Iteration $ITERATION..."
+    
+    # Run the opt passes, outputting to our "next" temp file
+    /usr/bin/opt -S -passes='function(mem2reg,instcombine,loop(indvars,loop-unroll-full)),ipsccp,function(dce)' \
+      "$TEMP_CURRENT" -o "$TEMP_NEXT"
+      
+    # Compare the current and next files silently. 
+    # cmp returns 0 if they are identical, 1 if they differ.
+    if cmp -s "$TEMP_CURRENT" "$TEMP_NEXT"; then
+        echo "      -> Converged after $ITERATION iterations!"
+        # Move the final, converged result to the expected output path
+        mv "$TEMP_NEXT" "$OPT_FILE"
+        break
+    fi
+    
+    # If not converged, the "next" file becomes the "current" file for the next loop
+    mv "$TEMP_NEXT" "$TEMP_CURRENT"
+    ((ITERATION++))
+done
+
+# Clean up the remaining temp file
+rm -f "$TEMP_CURRENT"
+
+echo "[4/6] Running P2S (Phi to stores)..."
 ./runp2s.sh "$OPT_FILE"
 
-echo "[5/5] Running Edge Collapsing..."
+echo "[5/6] Running Edge Collapsing..."
 /usr/bin/opt -load-pass-plugin=../CollapseEdges/CollapseEdges.so \
   -passes=collapse-edges \
   -S "$OPT_FILE" -o "$EC_FILE"
+
+echo "[6/6] Lifting back to C"
+./runcbe.sh "$EC_FILE"
 
 echo "--------------------------------------------------------"
 echo "Success! Final output generated at:"

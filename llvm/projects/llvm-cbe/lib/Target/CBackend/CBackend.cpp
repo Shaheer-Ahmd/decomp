@@ -299,6 +299,12 @@ NormalizedBranch *CWriter::normalizeBranch(llvm::BranchInst &I) {
     return Res;
   }
 
+  llvm::MDString *LoopContinueMDS = getMDString(I, llvm::mdk::LoopContinueKey);
+  if (LoopContinueMDS) {
+    Res->Kind = NormalizedBranchKind::LoopContinue;
+    return Res;
+  }
+
   return Res;
 }
 
@@ -620,7 +626,7 @@ std::string CWriter::getFunctionName(FunctionInfoVariant FIV) {
 }
 
 std::string CWriter::getArrayName(ArrayType *AT) {
-  // changed this to give uintx_t instead of struct l_array_xxx - Shaheer
+  // changed this to give uintx_t <arrname>[] instead of struct l_array_xxx - Shaheer
   std::string astr;
   raw_string_ostream ArrayInnards(astr);
   // Arrays are wrapped in structs to allow them to have normal
@@ -4238,21 +4244,7 @@ static StringRef getTypeForVarNameFromMD(const Module &M, StringRef VarName) {
 void CWriter::printFunction(Function &F) {
   llvm::errs() << "[printFunction] Printing function: "
                << F.getName() << "\n";
-  BlockNameToBlockPtrMap.clear();
-  unsigned tmpId = 0;
-  for (llvm::BasicBlock &BB : F) {
-    if (!BB.hasName()) {
-      BB.setName(("bb" + std::to_string(tmpId++)).c_str());
-    }
-    BlockNameToBlockPtrMap[BB.getName().str()] = &BB;
-  }
-  // for (const auto &entry : BlockNameToBlockPtrMap) {
-  //   llvm::errs() << "==== " << entry.getKey() << " ====\n";
-  //   entry.getValue()->print(llvm::errs());
-  //   llvm::errs() << "\n";
-  // }
 
-  // printing BlockName
   /// isStructReturn - Should this function actually return a struct by-value?
   bool isStructReturn = F.hasStructRetAttr();
 
@@ -4296,10 +4288,15 @@ void CWriter::printFunction(Function &F) {
       Out << "  ";
       // std::cout << "Calling printTypeName in printFunction in condition that
       // checks if the main function should be fixed\n";
-      printTypeName(Out, ArgTy);
-      Out << ' ' << GetValueName(ArgName) << " = (";
-      printTypeName(Out, ArgTy);
-      Out << ")" << MainArgs.begin()[Idx].second << ";\n";
+      if (GetValueName(ArgName) == MainArgs.begin()[Idx].second) {
+        // ignore redundant stores => we might not need this fixing as 
+        // the LLVM coded variables are stripped to be similar to the expected main function signature
+      } else {
+        printTypeName(Out, ArgTy);
+        Out << ' ' << GetValueName(ArgName) << " = (";
+        printTypeName(Out, ArgTy);
+        Out << ")" << MainArgs.begin()[Idx].second << ";\n";
+      }
 
       ++Idx;
       ++ArgName;
@@ -4347,6 +4344,22 @@ void CWriter::printFunction(Function &F) {
       llvm::errs()
           << "[printFunction] isDirectAlloca found for " << GetValueName(AI)
           << "\n";
+      
+      // Ignore param_i.addr allocas that have the same basename i.e param_i as any parameter of the function
+      StringRef baseName = GetValueName(AI);
+      bool isParamAddr = false;
+      for (const Argument &Arg : F.args()) {
+        if (GetValueName(&Arg) == baseName) {
+          isParamAddr = true;
+          break;
+        }
+      }
+      if (isParamAddr) {
+        llvm::errs() << "[printFunction] Skipping " << baseName
+                      << " because it is an addr alloca for a parameter\n";
+        continue;
+      }
+
       unsigned Alignment = AI->getAlign().value();
       bool IsOveraligned =
           Alignment &&
@@ -4789,9 +4802,11 @@ void CWriter::emitIf(IfShape ifShape) {
   if (isElseNecessary) {
     Out << " else ";
     if (ifShape.IsElseIf) {
-      if (BranchInst *ElseBr =
-              dyn_cast<BranchInst>(ifShape.ElseBB->getTerminator()))
-        visitBranchInst(*ElseBr);
+      // if (BranchInst *ElseBr =
+      //         dyn_cast<BranchInst>(ifShape.ElseBB->getTerminator()))
+      //   visitBranchInst(*ElseBr);
+      printBasicBlock(ifShape.ElseBB,
+                      printBasicBlockCustomArgs(false, false, true));
     } else {
       Out << "{\n";
       printBasicBlock(ifShape.ElseBB,
@@ -5067,7 +5082,12 @@ void CWriter::emitWhile(WhileShape whileShape) {
   llvm::errs() << "[emitWhile] called\n";
   Out << "while (";
   InlinedBlocks.insert(whileShape.CondBB);
-  emitCondition(whileShape.Cond);
+  if (!whileShape.Cond.OverwriteCCTree && !whileShape.Cond.IRValue) {
+    // If there is no condition, this is an infinite loop: just print "while (1)"
+    Out << "1";
+  } else {
+    emitCondition(whileShape.Cond);
+  }
   Out << ") {\n";
   printBasicBlock(whileShape.BodyBB,
                   printBasicBlockCustomArgs(false, false, true));
@@ -5107,8 +5127,12 @@ void CWriter::visitBranchInst(BranchInst &I,
     emitReturn(NBI->CCReturnInfo);
     return;
   case NormalizedBranchKind::UnconditionalJump:
+    // print with label
     printBasicBlock(I.getSuccessor(0),
                     printBasicBlockCustomArgs(false, false, false));
+    return;
+  case NormalizedBranchKind::LoopContinue:
+    Out << "continue;\n";
     return;
   default:
     llvm::errs() << "[visitBranchInst] Ignoring\n";
@@ -5953,6 +5977,7 @@ bool CWriter::lowerIntrinsics(Function &F) {
           case Intrinsic::abs:
           case Intrinsic::is_constant:
             // We directly implement these intrinsics
+          case Intrinsic::fshl: // WORKAROUND: fshl/fshr are not supported yet
             break;
 
           default:
@@ -6858,8 +6883,13 @@ void CWriter::visitLoadInst(LoadInst &I) {
 
 void CWriter::visitStoreInst(StoreInst &I) {
   llvm::errs() << "[visitStoreInst] called for instruction: " << I << "\n";
+  // return if getValueName(lhs) == getValueName(rhs) to avoid generating code like "x = x;"
+  if (GetValueName(I.getOperand(0)) == GetValueName(I.getOperand(1))) {
+    llvm::errs() << "[visitStoreInst] Skipping self-assignment for: " << I << "\n";
+    return;
+  }
+  
   CurInstr = &I;
-
   writeMemoryAccess(I.getPointerOperand(), I.getOperand(0)->getType(),
                     I.isVolatile(), I.getAlign().value());
   Out << " = ";

@@ -109,6 +109,7 @@ enum class NormalizedBranchKind {
   CCSwitch,
   CCReturn,
   UnconditionalJump,
+  LoopContinue,
   Unknown, // placeholder for everything we don't handle yet
 };
 
@@ -211,6 +212,9 @@ struct NormalizedBranch {
       break;
     case NormalizedBranchKind::UnconditionalJump:
       llvm::errs() << "NormalizedBranchKind::UnconditionalJump\n";
+      break;
+    case NormalizedBranchKind::LoopContinue:
+      llvm::errs() << "NormalizedBranchKind::LoopContinue\n";
       break;
     }
   }

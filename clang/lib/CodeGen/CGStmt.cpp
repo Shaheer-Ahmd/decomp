@@ -1851,7 +1851,15 @@ void CodeGenFunction::EmitContinueStmt(const ContinueStmt &S) {
   if (HaveInsertPoint())
     EmitStopPoint(&S);
 
-  EmitBranchThroughCleanup(BreakContinueStack.back().ContinueBlock);
+  JumpDest Dest = BreakContinueStack.back().ContinueBlock;
+  // Create the branch.
+  llvm::BranchInst *BI = Builder.CreateBr(Dest.getBlock());
+  llvm::LLVMContext &Ctx = BI->getContext();
+  llvm::MDNode *MD = llvm::MDNode::get(Ctx, llvm::MDString::get(Ctx, ""));
+
+  BI->setMetadata(llvm::mdk::LoopContinueKey, MD);
+
+  EmitBranchThroughCleanupImpl(Dest, BI);
 }
 
 /// EmitCaseStmtRange - If case statement range is not too big then
