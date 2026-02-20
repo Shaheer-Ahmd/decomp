@@ -34,6 +34,8 @@
 !llvm/lib/Transforms/Utils/
 !llvm/lib/Transforms/Utils/PromoteMemoryToRegister.cpp
 
+!/llvm/lib/Transforms/Utils/InlineFunction.cpp
+
 !build/
 !build/*.sh
 
